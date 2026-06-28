@@ -69,8 +69,6 @@ class SimUR3E(Robot):
             start_joints=self.config.start_joints_array(),
             collision_debug=self.config.collision_debug,
             camera_configs=self.config.cameras,
-            table_height=self.config.table_height,
-            table_wall_height=self.config.table_wall_height,
             show_viewer=self.config.show_viewer,
             command_substeps=self.config.command_substeps,
             gripper_command_substeps=self.config.gripper_command_substeps,

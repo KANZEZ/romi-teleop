@@ -10,9 +10,6 @@ from .ur3_self_collision_config import (
     DEFAULT_IGNORED_COLLISION_PAIRS,
     DEFAULT_LINE_SEARCH_STEPS,
     DEFAULT_MAX_JOINT_STEP,
-    DEFAULT_TABLE_HEIGHT,
-    DEFAULT_TABLE_MONITORED_POINTS,
-    DEFAULT_TABLE_WALL_HEIGHT,
     DEFAULT_UR3_PACKAGE_DIR,
     DEFAULT_UR3_URDF_PATH,
     UR3_ARM_DOFS,
@@ -28,12 +25,6 @@ class UR3SelfCollisionChecker:
         collision_margin: float = DEFAULT_COLLISION_MARGIN,
         line_search_steps: int = DEFAULT_LINE_SEARCH_STEPS,
         max_joint_step: float = DEFAULT_MAX_JOINT_STEP,
-        table_collision: bool = True,
-        table_height: float = DEFAULT_TABLE_HEIGHT,
-        table_wall_height: float = DEFAULT_TABLE_WALL_HEIGHT,
-        table_monitored_points: Iterable[
-            tuple[str, str, tuple[float, float, float]]
-        ] = DEFAULT_TABLE_MONITORED_POINTS,
     ) -> None:
         self.arm_dofs = UR3_ARM_DOFS
         self.urdf_path = Path(urdf_path)
@@ -46,14 +37,9 @@ class UR3SelfCollisionChecker:
         self.collision_margin = float(collision_margin)
         self.line_search_steps = int(line_search_steps)
         self.max_joint_step = float(max_joint_step)
-        self.table_collision = bool(table_collision)
-        self.table_height = float(table_height)
-        self.table_wall_height = float(table_wall_height)
-        self._table_wall_z = self.table_height + self.table_wall_height
         self._ignored_collision_pairs = {
             frozenset(pair) for pair in ignored_collision_pairs
         }
-        self._table_monitored_points = tuple(table_monitored_points)
 
         self._model, self._collision_model = pin.buildModelsFromUrdf(
             str(self.urdf_path),
@@ -64,10 +50,6 @@ class UR3SelfCollisionChecker:
         self._data = self._model.createData()
         self._collision_data = pin.GeometryData(self._collision_model)
         self._active_pair_indices = self._configure_collision_pairs()
-        self._table_frame_ids = {
-            frame_name: self._model.getFrameId(frame_name)
-            for _, frame_name, _ in self._table_monitored_points
-        }
 
     def _configure_collision_pairs(self) -> tuple[int, ...]:
         active_pair_indices: list[int] = []
@@ -93,30 +75,6 @@ class UR3SelfCollisionChecker:
             )
         return joints
 
-    def _table_wall_collisions(
-        self, joints: np.ndarray
-    ) -> tuple[list[tuple[str, str]], float | None]:
-        if not self.table_collision:
-            return [], None
-
-        pin.forwardKinematics(self._model, self._data, joints)
-        pin.updateFramePlacements(self._model, self._data)
-
-        minimum_clearance: float | None = None
-        collision_pairs: list[tuple[str, str]] = []
-        for point_name, frame_name, local_offset in self._table_monitored_points:
-            frame_transform = self._data.oMf[self._table_frame_ids[frame_name]]
-            point_position = frame_transform.translation + frame_transform.rotation @ np.asarray(
-                local_offset, dtype=float
-            )
-            clearance = float(point_position[2] - self._table_wall_z)
-            if minimum_clearance is None or clearance < minimum_clearance:
-                minimum_clearance = clearance
-            if clearance <= 0.0:
-                collision_pairs.append(("environment", point_name))
-
-        return collision_pairs, minimum_clearance
-
     def check(self, joints: np.ndarray) -> CollisionCheckResult:
         joints = self._validate_joints(joints)
         pin.computeDistances(
@@ -135,13 +93,6 @@ class UR3SelfCollisionChecker:
                 minimum_distance = distance
             if distance <= self.collision_margin:
                 collision_pairs.append(self._pair_names(pair_index))
-
-        table_collision_pairs, table_minimum_clearance = self._table_wall_collisions(joints)
-        collision_pairs.extend(table_collision_pairs)
-        if table_minimum_clearance is not None and (
-            minimum_distance is None or table_minimum_clearance < minimum_distance
-        ):
-            minimum_distance = table_minimum_clearance
 
         return CollisionCheckResult(
             in_collision=bool(collision_pairs),

@@ -1,0 +1,23 @@
+# Simulated UR3e with one GELLO leader.
+robot: ur3e
+mode: sim
+teleop_port: /dev/ttyUSB0
+fps: 30
+viewer: true
+
+repo_id: USER/SIM_UR3E_DATASET
+single_task: Describe the simulated task here.
+num_episodes: 10
+episode_time_s: 60.0
+
+cameras:
+  agentview:
+    type: mujoco
+    width: 640
+    height: 480
+    fps: 30
+  eye_in_hand:
+    type: mujoco
+    width: 640
+    height: 480
+    fps: 30

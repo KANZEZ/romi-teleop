@@ -1,0 +1,14 @@
+# Real bimanual UR5e with two GELLO leaders.
+robot: bi_ur5e
+mode: real
+left_robot_ip: 192.168.0.8
+right_robot_ip: 192.168.0.10
+left_teleop_port: /dev/ttyUSB0
+right_teleop_port: /dev/ttyUSB1
+
+repo_id: USER/BI_UR5E_DATASET
+single_task: Describe the bimanual task here.
+num_episodes: 10
+episode_time_s: 60.0
+
+cameras: {}

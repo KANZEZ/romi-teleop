@@ -20,8 +20,6 @@ class SimUR3EConfig(RobotConfig):
 
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
-    table_height: float | None = None
-    table_wall_height: float | None = None
     show_viewer: bool = False
     command_substeps: int = 6
     gripper_command_substeps: int = 120

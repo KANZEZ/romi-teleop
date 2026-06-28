@@ -8,8 +8,7 @@ The package mirrors `lerobot_robot_sim_ur3e`, but the MuJoCo scene is built in
 ## Scene
 
 - Two fixed UR5e arms with Robotiq 2F-85 grippers.
-- One table.
-- Ten small free cubes on the table.
+- One ground plane.
 - Three cameras:
   - `global`
   - `left_wrist`
@@ -25,6 +24,14 @@ The `assest/` directory is intentionally present for bundled or custom assets.
 The misspelling follows the requested directory name.
 
 ## Usage
+
+Teleoperate the empty MuJoCo scene with two GELLO leaders:
+
+```bash
+python scripts/teleoperate_bi_gello_sim_bi_ur5e.py \
+  --left-teleop-port /dev/ttyUSB0 \
+  --right-teleop-port /dev/ttyUSB1
+```
 
 ```python
 from lerobot_robot_sim_bi_ur5e import SimBiUR5E, SimBiUR5EConfig

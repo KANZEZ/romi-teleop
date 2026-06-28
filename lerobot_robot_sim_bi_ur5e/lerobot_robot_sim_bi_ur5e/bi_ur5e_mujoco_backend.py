@@ -1,9 +1,10 @@
-"""Internal MuJoCo backend for the bimanual simulated UR5e robot."""
+"""MuJoCo backend for the bimanual simulated UR5e robot."""
 
 import logging
 import threading
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Sequence
 
 import mujoco
 import numpy as np
@@ -12,9 +13,6 @@ from lerobot_camera_mujoco import MujocoCamera, MujocoCameraConfig
 
 from .build_bi_ur5e_mujoco_env import build_bi_ur5e_mujoco_env
 from .config_sim_bi_ur5e import LEFT_UR5E_START_JOINTS, RIGHT_UR5E_START_JOINTS
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -43,27 +41,63 @@ DEFAULT_COMMAND_SUBSTEPS = 6
 DEFAULT_GRIPPER_COMMAND_SUBSTEPS = 120
 
 
+def _project_root(project_root: str | Path | None) -> Path:
+    return Path(project_root) if project_root is not None else Path(__file__).resolve().parents[2]
+
+
+def _default_ur5e_path(project_root: Path) -> Path:
+    return (
+        project_root
+        / "lerobot_robot_sim_bi_ur5e"
+        / "assest"
+        / "mujoco_menagerie"
+        / "universal_robots_ur5e"
+        / "ur5e.xml"
+    )
+
+
+def _default_robotiq_path(project_root: Path) -> Path:
+    return (
+        project_root
+        / "lerobot_robot_sim_bi_ur5e"
+        / "assest"
+        / "mujoco_menagerie"
+        / "robotiq_2f85_v4"
+        / "2f85.xml"
+    )
+
+
+def _validate_asset_paths(ur5e_xml_path: Path, robotiq_xml_path: Path) -> None:
+    missing = []
+    if not ur5e_xml_path.is_file():
+        missing.append(f"UR5e MJCF: {ur5e_xml_path}")
+    if not robotiq_xml_path.is_file():
+        missing.append(f"Robotiq MJCF: {robotiq_xml_path}")
+    if missing:
+        raise FileNotFoundError("Missing MuJoCo simulation assets:\n" + "\n".join(missing))
+
+
 def _object_names(model: mujoco.MjModel, object_type: mujoco.mjtObj, count: int) -> list[str]:
     return [mujoco.mj_id2name(model, object_type, object_id) or "" for object_id in range(count)]
 
 
-def _matches_namespaced_name(object_name: str, local_name: str, namespaces: "Sequence[str]") -> bool:
+def _matches_namespaced_name(object_name: str, local_name: str, namespaces: Sequence[str]) -> bool:
     if not namespaces:
         return object_name == local_name or object_name.endswith(f"/{local_name}")
-    for namespace in namespaces:
-        if object_name == f"{namespace}/{local_name}":
-            return True
-        if object_name.startswith(f"{namespace}/") and object_name.endswith(f"/{local_name}"):
-            return True
-    return False
+
+    return any(
+        object_name == f"{namespace}/{local_name}"
+        or (object_name.startswith(f"{namespace}/") and object_name.endswith(f"/{local_name}"))
+        for namespace in namespaces
+    )
 
 
-def find_namespaced_id(
+def _find_namespaced_id(
     model: mujoco.MjModel,
     object_type: mujoco.mjtObj,
     count: int,
     local_name: str,
-    namespaces: "Sequence[str]" = (),
+    namespaces: Sequence[str] = (),
 ) -> int:
     names = _object_names(model, object_type, count)
     for object_id, object_name in enumerate(names):
@@ -75,50 +109,93 @@ def find_namespaced_id(
     )
 
 
-def find_camera_id(model: mujoco.MjModel, name: str) -> int:
-    return find_namespaced_id(model, mujoco.mjtObj.mjOBJ_CAMERA, model.ncam, name)
+def _find_camera_id(model: mujoco.MjModel, name: str) -> int:
+    return _find_namespaced_id(model, mujoco.mjtObj.mjOBJ_CAMERA, model.ncam, name)
 
 
+def _quat_from_mat(matrix: np.ndarray) -> np.ndarray:
+    quat = np.array([1.0, 0.0, 0.0, 0.0])
+    mujoco.mju_mat2Quat(quat, matrix.reshape(-1))
+    return quat
+
+
+@dataclass(frozen=True)
 class _ArmHandles:
-    def __init__(self, model: mujoco.MjModel, side: str):
+    arm_qpos_adrs: np.ndarray
+    arm_dof_adrs: np.ndarray
+    arm_actuator_ids: np.ndarray
+    fingers_actuator_id: int
+    right_driver_qpos_adr: int
+    wrist_body_id: int
+
+    @classmethod
+    def from_model(cls, model: mujoco.MjModel, side: str) -> "_ArmHandles":
         arm_namespaces = (f"{side}_ur5e",)
         gripper_namespaces = (f"{side}_ur5e", f"{side}_robotiq")
-
         joint_ids = [
-            find_namespaced_id(model, mujoco.mjtObj.mjOBJ_JOINT, model.njnt, name, arm_namespaces)
+            _find_namespaced_id(model, mujoco.mjtObj.mjOBJ_JOINT, model.njnt, name, arm_namespaces)
             for name in UR5E_ARM_JOINT_NAMES
         ]
         actuator_ids = [
-            find_namespaced_id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, model.nu, name, arm_namespaces)
+            _find_namespaced_id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, model.nu, name, arm_namespaces)
             for name in UR5E_ARM_ACTUATOR_NAMES
         ]
-
-        self.arm_qpos_adrs = model.jnt_qposadr[np.asarray(joint_ids, dtype=int)]
-        self.arm_dof_adrs = model.jnt_dofadr[np.asarray(joint_ids, dtype=int)]
-        self.arm_actuator_ids = np.asarray(actuator_ids, dtype=int)
-        self.fingers_actuator_id = find_namespaced_id(
+        fingers_actuator_id = _find_namespaced_id(
             model,
             mujoco.mjtObj.mjOBJ_ACTUATOR,
             model.nu,
             "fingers_actuator",
             gripper_namespaces,
         )
-        self.right_driver_qpos_adr = model.jnt_qposadr[
-            find_namespaced_id(
-                model,
-                mujoco.mjtObj.mjOBJ_JOINT,
-                model.njnt,
-                "right_driver_joint",
-                gripper_namespaces,
-            )
-        ]
-        self.wrist_body_id = find_namespaced_id(
+        right_driver_joint_id = _find_namespaced_id(
+            model,
+            mujoco.mjtObj.mjOBJ_JOINT,
+            model.njnt,
+            "right_driver_joint",
+            gripper_namespaces,
+        )
+        wrist_body_id = _find_namespaced_id(
             model,
             mujoco.mjtObj.mjOBJ_BODY,
             model.nbody,
             "wrist_3_link",
             arm_namespaces,
         )
+
+        return cls(
+            arm_qpos_adrs=model.jnt_qposadr[np.asarray(joint_ids, dtype=int)],
+            arm_dof_adrs=model.jnt_dofadr[np.asarray(joint_ids, dtype=int)],
+            arm_actuator_ids=np.asarray(actuator_ids, dtype=int),
+            fingers_actuator_id=fingers_actuator_id,
+            right_driver_qpos_adr=int(model.jnt_qposadr[right_driver_joint_id]),
+            wrist_body_id=wrist_body_id,
+        )
+
+
+@dataclass
+class _ArmState:
+    joints: np.ndarray
+    command: np.ndarray
+    velocities: np.ndarray
+    ee_pos_quat: np.ndarray
+
+    @classmethod
+    def from_start_joints(cls, start_joints: np.ndarray) -> "_ArmState":
+        joints = _validate_joint_state(start_joints, "start_joints")
+        return cls(
+            joints=joints,
+            command=joints.copy(),
+            velocities=np.zeros(UR5E_INTERFACE_DOFS, dtype=float),
+            ee_pos_quat=np.zeros(7, dtype=float),
+        )
+
+
+def _validate_joint_state(joint_state: np.ndarray, label: str) -> np.ndarray:
+    joint_state = np.asarray(joint_state, dtype=float).copy()
+    if joint_state.shape != (UR5E_INTERFACE_DOFS,):
+        raise ValueError(f"Expected {label} shape {(UR5E_INTERFACE_DOFS,)}, got {joint_state.shape}.")
+    joint_state[-1] = float(np.clip(joint_state[-1], 0.0, 1.0))
+    return joint_state
 
 
 class BiUR5EMujocoBackend:
@@ -128,42 +205,18 @@ class BiUR5EMujocoBackend:
         right_start_joints: np.ndarray | None = None,
         camera_configs: dict[str, CameraConfig] | None = None,
         project_root: str | Path | None = None,
-        assets_dir: str | Path | None = None,
         ur5e_xml_path: str | Path | None = None,
         robotiq_xml_path: str | Path | None = None,
         show_viewer: bool = False,
         command_substeps: int = DEFAULT_COMMAND_SUBSTEPS,
         gripper_command_substeps: int = DEFAULT_GRIPPER_COMMAND_SUBSTEPS,
-        table_size: tuple[float, float, float] = (1.2, 0.75, 0.05),
-        table_height: float = 0.75,
-        cube_count: int = 10,
-        cube_size: float = 0.035,
-        show_tool_collision: bool = False,
-        attached_broom_side: str | None = "left",
-        attached_dustpan_side: str | None = "right",
     ) -> None:
-        project_root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[2]
-        ur5e_xml_path = Path(ur5e_xml_path) if ur5e_xml_path is not None else (
-            project_root / "lerobot_robot_sim_bi_ur5e" / "assest" / "mujoco_menagerie" / "universal_robots_ur5e" / "ur5e.xml"
-        )
-        robotiq_xml_path = Path(robotiq_xml_path) if robotiq_xml_path is not None else (
-            project_root / "lerobot_robot_sim_bi_ur5e" / "assest" / "mujoco_menagerie" / "robotiq_2f85_v4" / "2f85.xml"
-        )
-        assets_dir = Path(assets_dir) if assets_dir is not None else project_root / "lerobot_robot_sim_bi_ur5e" / "assest"
-        self._validate_asset_paths(ur5e_xml_path, robotiq_xml_path)
+        project_root = _project_root(project_root)
+        ur5e_xml_path = Path(ur5e_xml_path) if ur5e_xml_path is not None else _default_ur5e_path(project_root)
+        robotiq_xml_path = Path(robotiq_xml_path) if robotiq_xml_path is not None else _default_robotiq_path(project_root)
+        _validate_asset_paths(ur5e_xml_path, robotiq_xml_path)
 
-        self._model = build_bi_ur5e_mujoco_env(
-            ur5e_xml_path=ur5e_xml_path,
-            robotiq_xml_path=robotiq_xml_path,
-            assets_dir=assets_dir,
-            table_size=table_size,
-            table_height=table_height,
-            cube_count=cube_count,
-            cube_size=cube_size,
-            show_tool_collision=show_tool_collision,
-            attached_broom_side=attached_broom_side,
-            attached_dustpan_side=attached_dustpan_side,
-        )
+        self._model = build_bi_ur5e_mujoco_env(ur5e_xml_path=ur5e_xml_path, robotiq_xml_path=robotiq_xml_path)
         self._model.opt.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
         self._data = mujoco.MjData(self._model)
         self._state_lock = threading.Lock()
@@ -172,30 +225,21 @@ class BiUR5EMujocoBackend:
         if self._command_substeps < 1 or self._gripper_command_substeps < 1:
             raise ValueError("MuJoCo command substeps must be positive.")
 
-        self._left_handles = _ArmHandles(self._model, "left")
-        self._right_handles = _ArmHandles(self._model, "right")
-
-        self._left_joint_state = self._validate_joint_state(
-            np.asarray(left_start_joints if left_start_joints is not None else LEFT_UR5E_START_JOINTS, dtype=float),
-            "left_start_joints",
+        self._left_handles = _ArmHandles.from_model(self._model, "left")
+        self._right_handles = _ArmHandles.from_model(self._model, "right")
+        self._left = _ArmState.from_start_joints(
+            np.asarray(left_start_joints if left_start_joints is not None else LEFT_UR5E_START_JOINTS, dtype=float)
         )
-        self._right_joint_state = self._validate_joint_state(
-            np.asarray(right_start_joints if right_start_joints is not None else RIGHT_UR5E_START_JOINTS, dtype=float),
-            "right_start_joints",
+        self._right = _ArmState.from_start_joints(
+            np.asarray(right_start_joints if right_start_joints is not None else RIGHT_UR5E_START_JOINTS, dtype=float)
         )
-        self._left_joint_cmd = self._left_joint_state.copy()
-        self._right_joint_cmd = self._right_joint_state.copy()
-        self._left_joint_velocities = np.zeros(UR5E_INTERFACE_DOFS, dtype=float)
-        self._right_joint_velocities = np.zeros(UR5E_INTERFACE_DOFS, dtype=float)
-        self._left_ee_pos_quat = np.zeros(7, dtype=float)
-        self._right_ee_pos_quat = np.zeros(7, dtype=float)
         self._viewer = None
         self._cameras: list[tuple[str, MujocoCamera]] = []
         self._stopped = False
 
         with self._state_lock:
-            self._initialize_arm_locked(self._left_handles, self._left_joint_cmd)
-            self._initialize_arm_locked(self._right_handles, self._right_joint_cmd)
+            self._initialize_arm_locked(self._left_handles, self._left.command)
+            self._initialize_arm_locked(self._right_handles, self._right.command)
             mujoco.mj_forward(self._model, self._data)
             self._apply_joint_cmd_locked(substeps=100)
 
@@ -203,33 +247,15 @@ class BiUR5EMujocoBackend:
         if show_viewer:
             self._launch_viewer()
 
-    @staticmethod
-    def _validate_asset_paths(ur5e_xml_path: Path, robotiq_xml_path: Path) -> None:
-        missing = []
-        if not ur5e_xml_path.is_file():
-            missing.append(f"UR5e MJCF: {ur5e_xml_path}")
-        if not robotiq_xml_path.is_file():
-            missing.append(f"Robotiq MJCF: {robotiq_xml_path}")
-        if missing:
-            raise FileNotFoundError("Missing MuJoCo simulation assets:\n" + "\n".join(missing))
-
-    @staticmethod
-    def _validate_joint_state(joint_state: np.ndarray, label: str) -> np.ndarray:
-        if joint_state.shape != (UR5E_INTERFACE_DOFS,):
-            raise ValueError(f"Expected {label} shape {(UR5E_INTERFACE_DOFS,)}, got {joint_state.shape}")
-        joint_state = joint_state.copy()
-        joint_state[-1] = float(np.clip(joint_state[-1], 0.0, 1.0))
-        return joint_state
-
     def _assert_running(self) -> None:
         if self._stopped:
             raise RuntimeError("Bimanual UR5e MuJoCo backend has been stopped.")
 
-    def _initialize_arm_locked(self, handles: _ArmHandles, joint_cmd: np.ndarray) -> None:
-        self._data.qpos[handles.arm_qpos_adrs] = joint_cmd[:UR5E_ARM_DOFS]
+    def _initialize_arm_locked(self, handles: _ArmHandles, command: np.ndarray) -> None:
+        self._data.qpos[handles.arm_qpos_adrs] = command[:UR5E_ARM_DOFS]
         self._data.qvel[handles.arm_dof_adrs] = 0.0
-        self._data.ctrl[handles.arm_actuator_ids] = joint_cmd[:UR5E_ARM_DOFS]
-        self._data.ctrl[handles.fingers_actuator_id] = float(joint_cmd[-1] * ROBOTIQ_CTRL_MAX)
+        self._data.ctrl[handles.arm_actuator_ids] = command[:UR5E_ARM_DOFS]
+        self._data.ctrl[handles.fingers_actuator_id] = float(command[-1] * ROBOTIQ_CTRL_MAX)
 
     def _configure_cameras(self, camera_configs: dict[str, CameraConfig]) -> None:
         self._assert_running()
@@ -241,7 +267,7 @@ class BiUR5EMujocoBackend:
                 )
             camera_name = camera_config.camera if camera_config.camera is not None else camera_key
             camera = MujocoCamera(camera_config)
-            camera.bind(self._model, self._data, find_camera_id(self._model, str(camera_name)))
+            camera.bind(self._model, self._data, _find_camera_id(self._model, str(camera_name)))
             camera.connect()
             self._cameras.append((camera_key, camera))
 
@@ -249,7 +275,7 @@ class BiUR5EMujocoBackend:
         self._assert_running()
         try:
             import mujoco.viewer
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             raise RuntimeError("Could not import mujoco.viewer. Install MuJoCo viewer dependencies.") from exc
 
         self._viewer = mujoco.viewer.launch_passive(self._model, self._data)
@@ -269,102 +295,87 @@ class BiUR5EMujocoBackend:
     def _ee_pos_quat_locked(self, handles: _ArmHandles) -> np.ndarray:
         ee_pos = self._data.xpos[handles.wrist_body_id].copy()
         ee_mat = self._data.xmat[handles.wrist_body_id].reshape(3, 3)
-        ee_quat = np.array([1.0, 0.0, 0.0, 0.0])
-        mujoco.mju_mat2Quat(ee_quat, ee_mat.reshape(-1))
-        return np.concatenate([ee_pos, ee_quat])
+        return np.concatenate([ee_pos, _quat_from_mat(ee_mat)])
 
-    def _update_arm_observations_locked(
-        self,
-        handles: _ArmHandles,
-        joint_state_attr: str,
-        velocities_attr: str,
-        ee_attr: str,
-    ) -> None:
-        arm_positions = self._data.qpos[handles.arm_qpos_adrs].copy()
-        arm_velocities = self._data.qvel[handles.arm_dof_adrs].copy()
-        gripper_pos = self._current_gripper_position_locked(handles)
-        joint_state = np.concatenate([arm_positions, [gripper_pos]])
-        velocities = getattr(self, velocities_attr)
-        velocities[:UR5E_ARM_DOFS] = arm_velocities
-        setattr(self, joint_state_attr, joint_state)
-        setattr(self, ee_attr, self._ee_pos_quat_locked(handles))
+    def _update_arm_observations_locked(self, handles: _ArmHandles, state: _ArmState) -> None:
+        state.joints = np.concatenate(
+            [
+                self._data.qpos[handles.arm_qpos_adrs].copy(),
+                [self._current_gripper_position_locked(handles)],
+            ]
+        )
+        state.velocities[:UR5E_ARM_DOFS] = self._data.qvel[handles.arm_dof_adrs].copy()
+        state.ee_pos_quat = self._ee_pos_quat_locked(handles)
 
     def _update_observations_locked(self) -> None:
-        self._update_arm_observations_locked(
-            self._left_handles,
-            "_left_joint_state",
-            "_left_joint_velocities",
-            "_left_ee_pos_quat",
-        )
-        self._update_arm_observations_locked(
-            self._right_handles,
-            "_right_joint_state",
-            "_right_joint_velocities",
-            "_right_ee_pos_quat",
-        )
+        self._update_arm_observations_locked(self._left_handles, self._left)
+        self._update_arm_observations_locked(self._right_handles, self._right)
+
+    def _set_arm_controls_locked(self, handles: _ArmHandles, command: np.ndarray) -> None:
+        self._data.ctrl[handles.arm_actuator_ids] = command[:UR5E_ARM_DOFS]
+        self._data.ctrl[handles.fingers_actuator_id] = float(command[-1] * ROBOTIQ_CTRL_MAX)
+
+    def _remember_grippers(self) -> tuple[float, float]:
+        return float(self._left.joints[-1]), float(self._right.joints[-1])
+
+    def _update_gripper_velocities(self, previous_grippers: tuple[float, float]) -> None:
+        self._left.velocities[-1] = self._left.joints[-1] - previous_grippers[0]
+        self._right.velocities[-1] = self._right.joints[-1] - previous_grippers[1]
 
     def _apply_joint_cmd_locked(self, substeps: int) -> None:
-        left_prev_gripper = float(self._left_joint_state[-1])
-        right_prev_gripper = float(self._right_joint_state[-1])
-        for _ in range(max(substeps, 1)):
-            self._data.ctrl[self._left_handles.arm_actuator_ids] = self._left_joint_cmd[:UR5E_ARM_DOFS]
-            self._data.ctrl[self._right_handles.arm_actuator_ids] = self._right_joint_cmd[:UR5E_ARM_DOFS]
-            self._data.ctrl[self._left_handles.fingers_actuator_id] = float(
-                np.clip(self._left_joint_cmd[-1], 0.0, 1.0) * ROBOTIQ_CTRL_MAX
-            )
-            self._data.ctrl[self._right_handles.fingers_actuator_id] = float(
-                np.clip(self._right_joint_cmd[-1], 0.0, 1.0) * ROBOTIQ_CTRL_MAX
-            )
+        previous_grippers = self._remember_grippers()
+        for _ in range(max(int(substeps), 1)):
+            self._set_arm_controls_locked(self._left_handles, self._left.command)
+            self._set_arm_controls_locked(self._right_handles, self._right.command)
             mujoco.mj_step(self._model, self._data)
         self._update_observations_locked()
-        self._left_joint_velocities[-1] = self._left_joint_state[-1] - left_prev_gripper
-        self._right_joint_velocities[-1] = self._right_joint_state[-1] - right_prev_gripper
+        self._update_gripper_velocities(previous_grippers)
         self._sync_viewer_locked()
 
     def step(self, substeps: int = 1, render_cameras: bool = False) -> None:
         """Advance simulation without overwriting viewer-edited actuator controls."""
         self._assert_running()
         with self._state_lock:
-            left_prev_gripper = float(self._left_joint_state[-1])
-            right_prev_gripper = float(self._right_joint_state[-1])
+            previous_grippers = self._remember_grippers()
             for _ in range(max(int(substeps), 1)):
                 mujoco.mj_step(self._model, self._data)
             self._update_observations_locked()
-            self._left_joint_velocities[-1] = self._left_joint_state[-1] - left_prev_gripper
-            self._right_joint_velocities[-1] = self._right_joint_state[-1] - right_prev_gripper
+            self._update_gripper_velocities(previous_grippers)
             if render_cameras:
                 self._render_cameras_locked()
             self._sync_viewer_locked()
 
     def command_joint_state(self, left_joint_state: np.ndarray, right_joint_state: np.ndarray) -> None:
         self._assert_running()
-        left_joint_state = self._validate_joint_state(np.asarray(left_joint_state, dtype=float), "left_joint_state")
-        right_joint_state = self._validate_joint_state(np.asarray(right_joint_state, dtype=float), "right_joint_state")
+        left_joint_state = _validate_joint_state(left_joint_state, "left_joint_state")
+        right_joint_state = _validate_joint_state(right_joint_state, "right_joint_state")
 
         with self._state_lock:
-            left_gripper_gap = abs(float(left_joint_state[-1]) - float(self._left_joint_state[-1]))
-            right_gripper_gap = abs(float(right_joint_state[-1]) - float(self._right_joint_state[-1]))
+            gripper_gap = max(
+                abs(float(left_joint_state[-1]) - float(self._left.joints[-1])),
+                abs(float(right_joint_state[-1]) - float(self._right.joints[-1])),
+            )
             substeps = (
                 self._gripper_command_substeps
-                if max(left_gripper_gap, right_gripper_gap) > GRIPPER_POSITION_EPS
+                if gripper_gap > GRIPPER_POSITION_EPS
                 else self._command_substeps
             )
-            self._left_joint_cmd = left_joint_state.copy()
-            self._right_joint_cmd = right_joint_state.copy()
+            self._left.command = left_joint_state.copy()
+            self._right.command = right_joint_state.copy()
             self._apply_joint_cmd_locked(substeps=substeps)
 
     def get_observations(self) -> dict[str, np.ndarray]:
         self._assert_running()
         with self._state_lock:
             return {
-                "left_joint_positions": self._left_joint_state.copy(),
-                "right_joint_positions": self._right_joint_state.copy(),
-                "left_joint_velocities": self._left_joint_velocities.copy(),
-                "right_joint_velocities": self._right_joint_velocities.copy(),
-                "left_ee_pos_quat": self._left_ee_pos_quat.copy(),
-                "right_ee_pos_quat": self._right_ee_pos_quat.copy(),
-                "left_gripper_position": np.array([self._left_joint_state[-1]], dtype=float),
-                "right_gripper_position": np.array([self._right_joint_state[-1]], dtype=float),
+                "left_joint_positions": self._left.joints.copy(),
+                "right_joint_positions": self._right.joints.copy(),
+                "left_joint_velocities": self._left.velocities.copy(),
+                "right_joint_velocities": self._right.velocities.copy(),
+                "left_ee_pos_quat": self._left.ee_pos_quat.copy(),
+                "right_ee_pos_quat": self._right.ee_pos_quat.copy(),
+                "left_gripper_position": np.array([self._left.joints[-1]], dtype=float),
+                "right_gripper_position": np.array([self._right.joints[-1]], dtype=float),
             }
 
     def _render_cameras_locked(self) -> None:

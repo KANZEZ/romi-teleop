@@ -1,0 +1,24 @@
+# Real single-arm UR3 with one GELLO leader.
+robot: ur3
+mode: real
+robot_ip: 158.132.172.214
+teleop_port: /dev/ttyUSB0
+
+repo_id: USER/UR3_DATASET
+single_task: Describe the task here.
+num_episodes: 10
+episode_time_s: 60.0
+
+cameras:
+  d455:
+    type: realsense
+    serial_number_or_name: "239222303378"
+    width: 1280
+    height: 720
+    fps: 30
+  d435:
+    type: realsense
+    serial_number_or_name: "317222074788"
+    width: 640
+    height: 480
+    fps: 30

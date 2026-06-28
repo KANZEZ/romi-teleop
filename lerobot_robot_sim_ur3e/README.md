@@ -8,7 +8,7 @@ This package implements the `SimUR3E` robot class, enabling control and observat
 
 ## Features
 
-- **MuJoCo Simulation**: Wraps the bundled UR3e + Robotiq 2F-85 scene.
+- **MuJoCo Simulation**: Wraps a minimal UR3e + Robotiq 2F-85 scene with a ground plane and cameras.
 - **LeRobot Interface**: Exposes `joint_0` through `joint_5` and normalized `gripper` action/observation features.
 - **Optional Sim Cameras**: Uses the separate `lerobot_camera_mujoco` plugin through the standard `robot.cameras` config.
 
@@ -22,6 +22,14 @@ This package implements the `SimUR3E` robot class, enabling control and observat
 
 ```bash
 uv pip install -e ./lerobot_robot_sim_ur3e
+```
+
+## Usage
+
+Teleoperate the empty MuJoCo scene with one GELLO leader:
+
+```bash
+python scripts/teleoperate_gello_sim_ur3e.py --teleop-port /dev/ttyUSB0
 ```
 
 ## Configuration

@@ -1,29 +1,18 @@
-"""Internal MuJoCo backend utilities for the simulated UR3e robot.
+"""MuJoCo backend utilities for the simulated UR3e robot."""
 
-Despite the historical filename, this module no longer starts network servers.
-It builds the MuJoCo scene and exposes a small in-process API used by
-``SimUR3E``: command joints, read state, render configured cameras, and clean up.
-"""
-
+import logging
 import shutil
 import tempfile
 import threading
 import xml.etree.ElementTree as ET
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mujoco
 import numpy as np
 from dm_control import mjcf
-
 from lerobot.cameras import CameraConfig
 from lerobot_camera_mujoco import MujocoCamera, MujocoCameraConfig
-
-from .safety.ur3_self_collision_config import (
-    DEFAULT_TABLE_HEIGHT,
-    DEFAULT_TABLE_WALL_HEIGHT,
-)
 
 if TYPE_CHECKING:
     from .safety.ur3_self_collision import UR3SelfCollisionChecker
@@ -31,7 +20,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_START_JOINTS = np.array(
-    [1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 1.5708, 0.0], dtype=float
+    [1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 1.5708, 0.0],
+    dtype=float,
 )
 UR3_ARM_DOFS = 6
 UR3_INTERFACE_DOFS = 7
@@ -43,15 +33,6 @@ UR3_ARM_JOINT_NAMES = (
     "wrist_2_joint",
     "wrist_3_joint",
 )
-ROBOTIQ_CTRL_MAX = 255.0
-ROBOTIQ_DRIVER_CLOSED = 0.8
-DEFAULT_COMMAND_SUBSTEPS = 6
-DEFAULT_GRIPPER_COMMAND_SUBSTEPS = 120
-GRIPPER_POSITION_EPS = 0.01
-TABLE_SURFACE_LOCAL_Z = 0.36
-TABLE_GEOM_CENTER_LOCAL_Z = 0.34
-TABLE_KEEPOUT_HALF_HEIGHT = 0.0025
-DEFAULT_OBJECT_FRICTION = "1.8 0.1 0.02"
 ARM_ACTUATOR_NAMES = (
     "shoulder_pan_act",
     "shoulder_lift_act",
@@ -63,7 +44,6 @@ ARM_ACTUATOR_NAMES = (
 ARM_ACTUATOR_KP = (2200.0, 2200.0, 1800.0, 700.0, 700.0, 500.0)
 ARM_ACTUATOR_KV = (120.0, 120.0, 100.0, 40.0, 40.0, 30.0)
 ARM_ACTUATOR_FORCE_LIMIT = (220.0, 220.0, 180.0, 70.0, 70.0, 50.0)
-UR3_BASE_BODY_EXCLUDE = ("ur3_robot/", "ur3_robot/shoulder_link")
 UR3_ADJACENT_BODY_EXCLUDES = (
     ("shoulder_link", "upper_arm_link"),
     ("upper_arm_link", "forearm_link"),
@@ -71,59 +51,97 @@ UR3_ADJACENT_BODY_EXCLUDES = (
     ("wrist_1_link", "wrist_2_link"),
     ("wrist_2_link", "wrist_3_link"),
 )
+UR3_BASE_BODY_EXCLUDE = ("ur3_robot/", "ur3_robot/shoulder_link")
+
+ROBOTIQ_CTRL_MAX = 255.0
+ROBOTIQ_DRIVER_CLOSED = 0.8
+GRIPPER_POSITION_EPS = 0.01
+DEFAULT_COMMAND_SUBSTEPS = 6
+DEFAULT_GRIPPER_COMMAND_SUBSTEPS = 120
 
 
-def attach_hand_to_arm(arm_mjcf: mjcf.RootElement, gripper_mjcf: mjcf.RootElement) -> None:
-    attachment_site = arm_mjcf.find("site", "attachment_site")
-    if attachment_site is None:
-        raise ValueError("attachment_site not found in UR3 MJCF")
-    attachment_site.attach(gripper_mjcf)
+def _project_root(project_root: str | Path | None) -> Path:
+    return Path(project_root) if project_root is not None else Path(__file__).resolve().parents[2]
 
 
-def materialize_ur3_sim_urdf(
-    output_dir: str | Path,
-    source_urdf_path: str | Path,
-    source_mesh_dir: str | Path,
-) -> Path:
+def _default_urdf_path(project_root: Path) -> Path:
+    return project_root / "lerobot_robot_sim_ur3e" / "assets" / "ur_description" / "urdf" / "ur3.urdf"
+
+
+def _default_mesh_dir(project_root: Path) -> Path:
+    return (
+        project_root
+        / "lerobot_robot_sim_ur3e"
+        / "assets"
+        / "ur_description"
+        / "meshes"
+        / "ur3"
+        / "collision"
+    )
+
+
+def _default_robotiq_path(project_root: Path) -> Path:
+    return (
+        project_root
+        / "lerobot_robot_sim_bi_ur5e"
+        / "assest"
+        / "mujoco_menagerie"
+        / "robotiq_2f85_v4"
+        / "2f85.xml"
+    )
+
+
+def _validate_asset_paths(source_urdf_path: Path, source_mesh_dir: Path, robotiq_xml_path: Path) -> None:
+    missing = []
+    if not source_urdf_path.is_file():
+        missing.append(f"UR3 URDF: {source_urdf_path}")
+    if not source_mesh_dir.is_dir():
+        missing.append(f"UR3 mesh dir: {source_mesh_dir}")
+    if not robotiq_xml_path.is_file():
+        missing.append(f"Robotiq MJCF: {robotiq_xml_path}")
+    if missing:
+        raise FileNotFoundError("Missing MuJoCo simulation assets:\n" + "\n".join(missing))
+
+
+def _materialize_ur3_sim_urdf(output_dir: str | Path, source_urdf_path: Path, source_mesh_dir: Path) -> Path:
     output_dir = Path(output_dir)
-    source_urdf_path = Path(source_urdf_path)
-    source_mesh_dir = Path(source_mesh_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for mesh_path in source_mesh_dir.glob("*.stl"):
         shutil.copy2(mesh_path, output_dir / mesh_path.name)
 
     tree = ET.parse(source_urdf_path)
-    root = tree.getroot()
-    for mesh in root.findall(".//mesh"):
-        filename = mesh.attrib["filename"]
-        mesh.attrib["filename"] = Path(filename).name.replace(".dae", ".stl")
+    for mesh in tree.getroot().findall(".//mesh"):
+        mesh.attrib["filename"] = Path(mesh.attrib["filename"]).name.replace(".dae", ".stl")
 
     output_path = output_dir / "ur3_sim.urdf"
     tree.write(output_path)
     return output_path
 
 
-def materialize_ur3_mjcf(
-    output_dir: str | Path,
-    source_urdf_path: str | Path,
-    source_mesh_dir: str | Path,
-) -> Path:
-    output_dir = Path(output_dir)
-    urdf_path = materialize_ur3_sim_urdf(output_dir, source_urdf_path, source_mesh_dir)
+def _materialize_ur3_mjcf(output_dir: str | Path, source_urdf_path: Path, source_mesh_dir: Path) -> Path:
+    urdf_path = _materialize_ur3_sim_urdf(output_dir, source_urdf_path, source_mesh_dir)
     model = mujoco.MjModel.from_xml_path(str(urdf_path))
-    mjcf_path = output_dir / "ur3_sim.xml"
+    mjcf_path = Path(output_dir) / "ur3_sim.xml"
     mujoco.mj_saveLastXML(str(mjcf_path), model)
     return mjcf_path
 
 
-def add_arm_position_actuators(arm_mjcf: mjcf.RootElement) -> None:
+def _attach_hand_to_arm(arm_mjcf: mjcf.RootElement, gripper_mjcf: mjcf.RootElement) -> None:
+    attachment_site = arm_mjcf.find("site", "attachment_site")
+    if attachment_site is None:
+        raise ValueError("attachment_site not found in UR3 MJCF")
+    attachment_site.attach(gripper_mjcf)
+
+
+def _add_arm_position_actuators(arm_mjcf: mjcf.RootElement) -> None:
     for actuator_name, joint_name, kp, kv, force_limit in zip(
         ARM_ACTUATOR_NAMES,
         UR3_ARM_JOINT_NAMES,
         ARM_ACTUATOR_KP,
         ARM_ACTUATOR_KV,
         ARM_ACTUATOR_FORCE_LIMIT,
+        strict=True,
     ):
         arm_mjcf.actuator.add(
             "position",
@@ -136,22 +154,17 @@ def add_arm_position_actuators(arm_mjcf: mjcf.RootElement) -> None:
         )
 
 
-def add_arm_contact_excludes(arm_mjcf: mjcf.RootElement) -> None:
+def _add_arm_contact_excludes(arm_mjcf: mjcf.RootElement) -> None:
     for body1, body2 in UR3_ADJACENT_BODY_EXCLUDES:
         arm_mjcf.contact.add("exclude", body1=body1, body2=body2)
 
 
-def add_default_wrist_camera(arm_mjcf: mjcf.RootElement) -> None:
+def _add_wrist_site_and_camera(arm_mjcf: mjcf.RootElement) -> None:
     wrist_3_link = arm_mjcf.find("body", "wrist_3_link")
     if wrist_3_link is None:
         raise ValueError("wrist_3_link not found in generated UR3 MJCF")
 
-    wrist_3_link.add(
-        "site",
-        name="attachment_site",
-        pos="0 0 -0.007",
-        quat="1 0 0 0",
-    )
+    wrist_3_link.add("site", name="attachment_site", pos="0 0 -0.007", quat="1 0 0 0")
     wrist_3_link.add(
         "camera",
         name="eye_in_hand",
@@ -162,128 +175,8 @@ def add_default_wrist_camera(arm_mjcf: mjcf.RootElement) -> None:
     )
 
 
-def add_default_scene_objects(arena: mjcf.RootElement, table_body) -> None:
-    arena.asset.add("material", name="cube_red", rgba="0.85 0.2 0.2 1")
-    arena.asset.add("material", name="cube_blue", rgba="0.2 0.35 0.9 1")
-    arena.asset.add("material", name="cylinder_green", rgba="0.2 0.75 0.3 1")
-    arena.asset.add("material", name="tray_material", rgba="0.25 0.25 0.3 1")
-
-    tray = table_body.add("body", name="tray", pos="-0.02 0.26 0.39")
-    tray.add(
-        "geom",
-        name="tray_bottom",
-        type="box",
-        pos="0 0 -0.02",
-        size="0.085 0.12 0.01",
-        material="tray_material",
-    )
-    for name, x, y, sx, sy in (
-        ("tray_wall_left", 0.0, 0.11, 0.085, 0.01),
-        ("tray_wall_right", 0.0, -0.11, 0.085, 0.01),
-        ("tray_wall_front", 0.075, 0.0, 0.01, 0.12),
-        ("tray_wall_back", -0.075, 0.0, 0.01, 0.12),
-    ):
-        tray.add(
-            "geom",
-            name=name,
-            type="box",
-            pos=f"{x} {y} 0",
-            size=f"{sx} {sy} 0.03",
-            material="tray_material",
-        )
-
-    cube_red = arena.worldbody.add("body", name="cube_red_body", pos="-0.18 0.18 0.03")
-    cube_red.add("freejoint")
-    cube_red.add(
-        "geom",
-        name="cube_red_geom",
-        type="box",
-        size="0.02 0.02 0.02",
-        mass="0.08",
-        friction=DEFAULT_OBJECT_FRICTION,
-        material="cube_red",
-    )
-
-    cube_blue = arena.worldbody.add("body", name="cube_blue_body", pos="0.32 0.18 0.03")
-    cube_blue.add("freejoint")
-    cube_blue.add(
-        "geom",
-        name="cube_blue_geom",
-        type="box",
-        size="0.02 0.02 0.02",
-        mass="0.08",
-        friction=DEFAULT_OBJECT_FRICTION,
-        material="cube_blue",
-    )
-
-    cylinder_green = arena.worldbody.add(
-        "body", name="cylinder_green_body", pos="-0.26 0.34 0.022"
-    )
-    cylinder_green.add("freejoint")
-    cylinder_green.add(
-        "geom",
-        name="cylinder_green_visual",
-        type="cylinder",
-        size="0.022 0.022",
-        material="cylinder_green",
-        contype="0",
-        conaffinity="0",
-        group="2",
-    )
-    cylinder_green.add(
-        "geom",
-        name="cylinder_green_collision",
-        type="box",
-        size="0.018 0.018 0.022",
-        mass="0.10",
-        friction="0.9 0.05 0.01",
-        rgba="0 0 0 0",
-        group="3",
-        solref="0.01 1",
-        solimp="0.95 0.99 0.001",
-    )
-
-
-def add_default_scene_cameras(arena: mjcf.RootElement) -> None:
-    arena.worldbody.add(
-        "camera",
-        name="agentview",
-        mode="fixed",
-        pos="0.9 -0.85 0.8",
-        xyaxes="0.884 0.468 0 -0.288 0.543 0.789",
-        fovy="50",
-    )
-    arena.worldbody.add(
-        "camera",
-        name="sideview",
-        mode="fixed",
-        pos="0.15 -1.05 0.6",
-        xyaxes="0.962 -0.275 0 0.124 0.433 0.893",
-        fovy="50",
-    )
-
-
-def build_ur3_robotiq_model(
-    output_dir: str | Path,
-    source_urdf_path: str | Path,
-    source_mesh_dir: str | Path,
-    robotiq_xml_path: str | Path,
-    table_height: float = DEFAULT_TABLE_HEIGHT,
-    table_wall_height: float = DEFAULT_TABLE_WALL_HEIGHT,
-) -> mujoco.MjModel:
-    mjcf_path = materialize_ur3_mjcf(output_dir, source_urdf_path, source_mesh_dir)
-    arm_mjcf = mjcf.from_path(str(mjcf_path))
-    add_arm_position_actuators(arm_mjcf)
-    add_arm_contact_excludes(arm_mjcf)
-    add_default_wrist_camera(arm_mjcf)
-
-    gripper_mjcf = mjcf.from_path(str(robotiq_xml_path))
-    attach_hand_to_arm(arm_mjcf, gripper_mjcf)
-
-    arena = mjcf.RootElement()
+def _add_lights_floor_and_cameras(arena: mjcf.RootElement) -> None:
     arena.asset.add("material", name="floor_material", rgba="0.18 0.18 0.18 1")
-    arena.asset.add("material", name="table_material", rgba="0.55 0.42 0.3 1")
-    arena.asset.add("material", name="keepout_material", rgba="0.8 0.1 0.1 0.2")
     arena.worldbody.add(
         "light",
         name="key_light",
@@ -304,115 +197,104 @@ def build_ur3_robotiq_model(
         specular="0.05 0.05 0.05",
         castshadow="false",
     )
+    arena.worldbody.add("geom", name="floor", type="plane", pos="0 0 0", size="3 3 0.05", material="floor_material")
     arena.worldbody.add(
-        "geom",
-        name="floor",
-        type="plane",
-        pos="0 0 -0.75",
-        size="0 0 1",
-        material="floor_material",
+        "camera",
+        name="agentview",
+        mode="fixed",
+        pos="0.9 -0.85 0.8",
+        xyaxes="0.884 0.468 0 -0.288 0.543 0.789",
+        fovy="50",
     )
-    table_body_z = float(table_height) - TABLE_SURFACE_LOCAL_Z
-    table_keepout_z = TABLE_SURFACE_LOCAL_Z + float(table_wall_height)
-    table_body = arena.worldbody.add(
-        "body", name="table_body", pos=f"0 0 {table_body_z}"
+    arena.worldbody.add(
+        "camera",
+        name="sideview",
+        mode="fixed",
+        pos="0.15 -1.05 0.6",
+        xyaxes="0.962 -0.275 0 0.124 0.433 0.893",
+        fovy="50",
     )
-    table_body.add(
-        "geom",
-        name="table",
-        type="box",
-        pos=f"0 0 {TABLE_GEOM_CENTER_LOCAL_Z}",
-        size="0.45 0.6 0.02",
-        material="table_material",
-    )
-    table_body.add(
-        "geom",
-        name="table_keepout",
-        type="box",
-        pos=f"0 0 {table_keepout_z}",
-        size=f"0.45 0.6 {TABLE_KEEPOUT_HALF_HEIGHT}",
-        material="keepout_material",
-        contype="0",
-        conaffinity="0",
-    )
-    for leg_name, x, y in (
-        ("table_leg_front_left", 0.38, 0.53),
-        ("table_leg_front_right", 0.38, -0.53),
-        ("table_leg_back_left", -0.38, 0.53),
-        ("table_leg_back_right", -0.38, -0.53),
-    ):
-        table_body.add(
-            "geom",
-            name=leg_name,
-            type="box",
-            pos=f"{x} {y} -0.01",
-            size="0.03 0.03 0.33",
-            material="table_material",
-        )
 
-    arena.worldbody.attach(arm_mjcf)
-    arena.contact.add(
-        "exclude", body1=UR3_BASE_BODY_EXCLUDE[0], body2=UR3_BASE_BODY_EXCLUDE[1]
-    )
-    add_default_scene_objects(arena, table_body)
-    add_default_scene_cameras(arena)
 
+def _collect_mjcf_assets(root: mjcf.RootElement) -> dict[str, bytes]:
     assets: dict[str, bytes] = {}
-    for asset in arena.asset.all_children():
+    for asset in root.asset.all_children():
         if asset.tag == "mesh":
             mesh_file = asset.file
             assets[mesh_file.get_vfs_filename()] = mesh_file.contents
+    return assets
 
-    return mujoco.MjModel.from_xml_string(arena.to_xml_string(), assets)
+
+def build_ur3_robotiq_model(
+    output_dir: str | Path,
+    source_urdf_path: str | Path,
+    source_mesh_dir: str | Path,
+    robotiq_xml_path: str | Path,
+) -> mujoco.MjModel:
+    mjcf_path = _materialize_ur3_mjcf(output_dir, Path(source_urdf_path), Path(source_mesh_dir))
+    arm_mjcf = mjcf.from_path(str(mjcf_path))
+    _add_arm_position_actuators(arm_mjcf)
+    _add_arm_contact_excludes(arm_mjcf)
+    _add_wrist_site_and_camera(arm_mjcf)
+
+    gripper_mjcf = mjcf.from_path(str(robotiq_xml_path))
+    _attach_hand_to_arm(arm_mjcf, gripper_mjcf)
+
+    arena = mjcf.RootElement()
+    _add_lights_floor_and_cameras(arena)
+    arena.worldbody.attach(arm_mjcf)
+    arena.contact.add("exclude", body1=UR3_BASE_BODY_EXCLUDE[0], body2=UR3_BASE_BODY_EXCLUDE[1])
+
+    return mujoco.MjModel.from_xml_string(arena.to_xml_string(), _collect_mjcf_assets(arena))
 
 
-def _find_named_id(
-    model: mujoco.MjModel,
-    object_type: mujoco.mjtObj,
-    count: int,
-    name: str,
-) -> int:
+def _object_name(model: mujoco.MjModel, object_type: mujoco.mjtObj, object_id: int) -> str:
+    return mujoco.mj_id2name(model, object_type, object_id) or ""
+
+
+def _name_matches(object_name: str, local_name: str) -> bool:
+    return object_name == local_name or object_name.endswith(f"/{local_name}")
+
+
+def _find_named_id(model: mujoco.MjModel, object_type: mujoco.mjtObj, count: int, name: str) -> int:
     for object_id in range(count):
-        object_name = mujoco.mj_id2name(model, object_type, object_id)
-        if object_name == name or object_name.endswith(f"/{name}"):
+        if _name_matches(_object_name(model, object_type, object_id), name):
             return object_id
-    available = [
-        mujoco.mj_id2name(model, object_type, object_id) for object_id in range(count)
-    ]
+    available = [_object_name(model, object_type, object_id) for object_id in range(count)]
     raise ValueError(f"{object_type.name} {name!r} not found. Available: {available}")
 
 
-def _maybe_find_named_id(
-    model: mujoco.MjModel,
-    object_type: mujoco.mjtObj,
-    count: int,
-    name: str,
-) -> int | None:
+def _maybe_find_named_id(model: mujoco.MjModel, object_type: mujoco.mjtObj, count: int, name: str) -> int | None:
     for object_id in range(count):
-        object_name = mujoco.mj_id2name(model, object_type, object_id)
-        if object_name == name or object_name.endswith(f"/{name}"):
+        if _name_matches(_object_name(model, object_type, object_id), name):
             return object_id
     return None
 
 
-def find_camera_id(model: mujoco.MjModel, name: str) -> int:
+def _find_camera_id(model: mujoco.MjModel, name: str) -> int:
     return _find_named_id(model, mujoco.mjtObj.mjOBJ_CAMERA, model.ncam, name)
 
 
-def find_joint_id(model: mujoco.MjModel, name: str) -> int:
+def _find_joint_id(model: mujoco.MjModel, name: str) -> int:
     return _find_named_id(model, mujoco.mjtObj.mjOBJ_JOINT, model.njnt, name)
 
 
-def find_body_id(model: mujoco.MjModel, name: str) -> int:
+def _find_body_id(model: mujoco.MjModel, name: str) -> int:
     return _find_named_id(model, mujoco.mjtObj.mjOBJ_BODY, model.nbody, name)
 
 
-def maybe_find_site_id(model: mujoco.MjModel, name: str) -> int | None:
+def _maybe_find_site_id(model: mujoco.MjModel, name: str) -> int | None:
     return _maybe_find_named_id(model, mujoco.mjtObj.mjOBJ_SITE, model.nsite, name)
 
 
-def find_actuator_id(model: mujoco.MjModel, name: str) -> int:
+def _find_actuator_id(model: mujoco.MjModel, name: str) -> int:
     return _find_named_id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, model.nu, name)
+
+
+def _quat_from_mat(matrix: np.ndarray) -> np.ndarray:
+    quat = np.array([1.0, 0.0, 0.0, 0.0])
+    mujoco.mju_mat2Quat(quat, matrix.reshape(-1))
+    return quat
 
 
 class UR3MujocoBackend:
@@ -422,8 +304,6 @@ class UR3MujocoBackend:
         collision_checker: "UR3SelfCollisionChecker | None" = None,
         collision_debug: bool = False,
         camera_configs: dict[str, CameraConfig] | None = None,
-        table_height: float | None = None,
-        table_wall_height: float | None = None,
         project_root: str | Path | None = None,
         source_urdf_path: str | Path | None = None,
         source_mesh_dir: str | Path | None = None,
@@ -433,50 +313,18 @@ class UR3MujocoBackend:
         gripper_command_substeps: int = DEFAULT_GRIPPER_COMMAND_SUBSTEPS,
     ) -> None:
         self._temp_dir = tempfile.TemporaryDirectory(prefix="ur3-mujoco-")
-        project_root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[2]
-        source_urdf_path = Path(source_urdf_path) if source_urdf_path is not None else (
-            project_root / "lerobot_robot_sim_ur3e" / "assets" / "ur_description" / "urdf" / "ur3.urdf"
-        )
-        source_mesh_dir = Path(source_mesh_dir) if source_mesh_dir is not None else (
-            project_root / "lerobot_robot_sim_ur3e" / "assets" / "ur_description" / "meshes" / "ur3" / "collision"
-        )
-        robotiq_xml_path = Path(robotiq_xml_path) if robotiq_xml_path is not None else (
-            project_root / "lerobot_robot_sim_bi_ur5e" / "assest" / "mujoco_menagerie" / "robotiq_2f85_v4" / "2f85.xml"
-        )
-        self._validate_asset_paths(source_urdf_path, source_mesh_dir, robotiq_xml_path)
+        project_root = _project_root(project_root)
+        source_urdf_path = Path(source_urdf_path) if source_urdf_path is not None else _default_urdf_path(project_root)
+        source_mesh_dir = Path(source_mesh_dir) if source_mesh_dir is not None else _default_mesh_dir(project_root)
+        robotiq_xml_path = Path(robotiq_xml_path) if robotiq_xml_path is not None else _default_robotiq_path(project_root)
+        _validate_asset_paths(source_urdf_path, source_mesh_dir, robotiq_xml_path)
 
-        visual_table_height = (
-            float(table_height)
-            if table_height is not None
-            else (
-                collision_checker.table_height
-                if collision_checker is not None
-                else DEFAULT_TABLE_HEIGHT
-            )
-        )
-        visual_table_wall_height = (
-            float(table_wall_height)
-            if table_wall_height is not None
-            else (
-                collision_checker.table_wall_height
-                if collision_checker is not None
-                else DEFAULT_TABLE_WALL_HEIGHT
-            )
-        )
-
-        self._model = build_ur3_robotiq_model(
-            self._temp_dir.name,
-            source_urdf_path,
-            source_mesh_dir,
-            robotiq_xml_path,
-            table_height=visual_table_height,
-            table_wall_height=visual_table_wall_height,
-        )
+        self._model = build_ur3_robotiq_model(self._temp_dir.name, source_urdf_path, source_mesh_dir, robotiq_xml_path)
         self._model.opt.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
         self._data = mujoco.MjData(self._model)
+        self._state_lock = threading.Lock()
         self._collision_checker = collision_checker
         self._collision_debug = collision_debug
-        self._state_lock = threading.Lock()
         self._command_substeps = int(command_substeps)
         self._gripper_command_substeps = int(gripper_command_substeps)
         if self._command_substeps < 1 or self._gripper_command_substeps < 1:
@@ -484,69 +332,50 @@ class UR3MujocoBackend:
 
         self._arm_dofs = UR3_ARM_DOFS
         self._interface_dofs = UR3_INTERFACE_DOFS
-        self._joint_state = np.asarray(start_joints, dtype=float).copy()
-        if self._joint_state.shape != (self._interface_dofs,):
-            raise ValueError(
-                f"Expected start_joints shape {(self._interface_dofs,)}, got {self._joint_state.shape}"
-            )
-        self._joint_cmd = self._joint_state.copy()
+        self._joint_cmd = self._validate_joint_state(start_joints, "start_joints")
+        self._joint_state = self._joint_cmd.copy()
         self._joint_velocities = np.zeros(self._interface_dofs, dtype=float)
         self._ee_pos_quat = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=float)
 
-        self._arm_joint_ids = np.array(
-            [find_joint_id(self._model, name) for name in UR3_ARM_JOINT_NAMES],
-            dtype=int,
-        )
+        self._arm_joint_ids = np.array([_find_joint_id(self._model, name) for name in UR3_ARM_JOINT_NAMES], dtype=int)
         self._arm_qpos_adrs = self._model.jnt_qposadr[self._arm_joint_ids]
         self._arm_dof_adrs = self._model.jnt_dofadr[self._arm_joint_ids]
+        self._arm_actuator_ids = np.array([_find_actuator_id(self._model, name) for name in ARM_ACTUATOR_NAMES])
+        self._fingers_actuator_id = _find_actuator_id(self._model, "fingers_actuator")
+        self._right_driver_qpos_adr = self._model.jnt_qposadr[_find_joint_id(self._model, "right_driver_joint")]
+        self._pinch_site_id = _maybe_find_site_id(self._model, "pinch")
+        self._wrist_body_id = _find_body_id(self._model, "wrist_3_link")
 
-        self._arm_actuator_ids = np.array(
-            [find_actuator_id(self._model, name) for name in ARM_ACTUATOR_NAMES],
-            dtype=int,
-        )
-        self._fingers_actuator_id = find_actuator_id(
-            self._model, "fingers_actuator"
-        )
-        self._pinch_site_id = maybe_find_site_id(self._model, "pinch")
-        self._right_driver_qpos_adr = self._model.jnt_qposadr[
-            find_joint_id(self._model, "right_driver_joint")
-        ]
-        self._wrist_body_id = find_body_id(self._model, "wrist_3_link")
         self._viewer = None
-
-        with self._state_lock:
-            self._data.qpos[self._arm_qpos_adrs] = self._joint_cmd[: self._arm_dofs]
-            self._data.qvel[self._arm_dof_adrs] = 0.0
-            self._data.ctrl[self._arm_actuator_ids] = self._joint_cmd[: self._arm_dofs]
-            self._data.ctrl[self._fingers_actuator_id] = 0.0
-            mujoco.mj_forward(self._model, self._data)
-            self._apply_joint_cmd_locked(substeps=100)
-
         self._cameras: list[tuple[str, MujocoCamera]] = []
         self._stopped = False
+
+        with self._state_lock:
+            self._initialize_locked()
+            self._apply_joint_cmd_locked(substeps=100)
+
         self._configure_cameras(camera_configs or {})
         if show_viewer:
             self._launch_viewer()
 
     @staticmethod
-    def _validate_asset_paths(
-        source_urdf_path: Path,
-        source_mesh_dir: Path,
-        robotiq_xml_path: Path,
-    ) -> None:
-        missing = []
-        if not source_urdf_path.is_file():
-            missing.append(f"UR3 URDF: {source_urdf_path}")
-        if not source_mesh_dir.is_dir():
-            missing.append(f"UR3 mesh dir: {source_mesh_dir}")
-        if not robotiq_xml_path.is_file():
-            missing.append(f"Robotiq MJCF: {robotiq_xml_path}")
-        if missing:
-            raise FileNotFoundError("Missing MuJoCo simulation assets:\n" + "\n".join(missing))
+    def _validate_joint_state(joint_state: np.ndarray, label: str) -> np.ndarray:
+        joint_state = np.asarray(joint_state, dtype=float).copy()
+        if joint_state.shape != (UR3_INTERFACE_DOFS,):
+            raise ValueError(f"Expected {label} shape {(UR3_INTERFACE_DOFS,)}, got {joint_state.shape}.")
+        joint_state[-1] = float(np.clip(joint_state[-1], 0.0, 1.0))
+        return joint_state
 
     def _assert_running(self) -> None:
         if self._stopped:
             raise RuntimeError("UR3 MuJoCo backend has been stopped.")
+
+    def _initialize_locked(self) -> None:
+        self._data.qpos[self._arm_qpos_adrs] = self._joint_cmd[: self._arm_dofs]
+        self._data.qvel[self._arm_dof_adrs] = 0.0
+        self._data.ctrl[self._arm_actuator_ids] = self._joint_cmd[: self._arm_dofs]
+        self._data.ctrl[self._fingers_actuator_id] = float(self._joint_cmd[-1] * ROBOTIQ_CTRL_MAX)
+        mujoco.mj_forward(self._model, self._data)
 
     def _configure_cameras(self, camera_configs: dict[str, CameraConfig]) -> None:
         self._assert_running()
@@ -558,7 +387,7 @@ class UR3MujocoBackend:
                 )
             camera_name = camera_config.camera if camera_config.camera is not None else camera_key
             camera = MujocoCamera(camera_config)
-            camera.bind(self._model, self._data, find_camera_id(self._model, str(camera_name)))
+            camera.bind(self._model, self._data, _find_camera_id(self._model, str(camera_name)))
             camera.connect()
             self._cameras.append((camera_key, camera))
 
@@ -589,65 +418,66 @@ class UR3MujocoBackend:
         driver_pos = float(self._data.qpos[self._right_driver_qpos_adr])
         return float(np.clip(driver_pos / ROBOTIQ_DRIVER_CLOSED, 0.0, 1.0))
 
-    def _update_observations_locked(self) -> None:
-        ee_pos = np.zeros(3)
-        ee_quat = np.array([1.0, 0.0, 0.0, 0.0])
+    def _current_ee_pos_quat_locked(self) -> np.ndarray:
         if self._pinch_site_id is not None:
-            ee_pos = self._data.site_xpos[self._pinch_site_id].copy()
-            ee_mat = self._data.site_xmat[self._pinch_site_id].reshape(3, 3)
-            mujoco.mju_mat2Quat(ee_quat, ee_mat.reshape(-1))
-        elif self._wrist_body_id >= 0:
-            ee_pos = self._data.xpos[self._wrist_body_id].copy()
-            ee_mat = self._data.xmat[self._wrist_body_id].reshape(3, 3)
-            mujoco.mju_mat2Quat(ee_quat, ee_mat.reshape(-1))
+            pos = self._data.site_xpos[self._pinch_site_id].copy()
+            mat = self._data.site_xmat[self._pinch_site_id].reshape(3, 3)
+        else:
+            pos = self._data.xpos[self._wrist_body_id].copy()
+            mat = self._data.xmat[self._wrist_body_id].reshape(3, 3)
+        return np.concatenate([pos, _quat_from_mat(mat)])
 
-        gripper_pos = self._current_gripper_position_locked()
+    def _update_observations_locked(self) -> None:
         arm_positions = self._data.qpos[self._arm_qpos_adrs].copy()
         arm_velocities = self._data.qvel[self._arm_dof_adrs].copy()
-        self._joint_state = np.concatenate([arm_positions, [gripper_pos]])
+        self._joint_state = np.concatenate([arm_positions, [self._current_gripper_position_locked()]])
         self._joint_velocities[: self._arm_dofs] = arm_velocities
-        self._ee_pos_quat = np.concatenate([ee_pos, ee_quat])
+        self._ee_pos_quat = self._current_ee_pos_quat_locked()
 
     def _apply_joint_cmd_locked(self, substeps: int) -> None:
         arm_cmd = self._joint_cmd[: self._arm_dofs]
-        gripper_ctrl = float(np.clip(self._joint_cmd[-1], 0.0, 1.0) * ROBOTIQ_CTRL_MAX)
+        gripper_ctrl = float(self._joint_cmd[-1] * ROBOTIQ_CTRL_MAX)
         prev_gripper = float(self._joint_state[-1])
-        for _ in range(max(substeps, 1)):
+
+        for _ in range(max(int(substeps), 1)):
             self._data.ctrl[self._arm_actuator_ids] = arm_cmd
             self._data.ctrl[self._fingers_actuator_id] = gripper_ctrl
             mujoco.mj_step(self._model, self._data)
-        self._joint_velocities[-1] = self._current_gripper_position_locked() - prev_gripper
+
         self._update_observations_locked()
+        self._joint_velocities[-1] = self._joint_state[-1] - prev_gripper
         self._sync_viewer_locked()
+
+    def _project_safe_arm_command_locked(self, joint_state: np.ndarray) -> np.ndarray:
+        if self._collision_checker is None:
+            return joint_state
+
+        desired_arm = joint_state[: self._collision_checker.arm_dofs]
+        current_arm = self._data.qpos[self._arm_qpos_adrs].copy()
+        safe_arm = self._collision_checker.project_to_safe(current_arm, desired_arm)
+        if self._collision_debug and not np.allclose(safe_arm, desired_arm):
+            result = self._collision_checker.check(desired_arm)
+            logger.debug(
+                "Self-collision filter clipped UR3 sim command: %s",
+                {
+                    "current": np.round(current_arm, 4).tolist(),
+                    "desired": np.round(desired_arm, 4).tolist(),
+                    "safe": np.round(safe_arm, 4).tolist(),
+                    "pairs": list(result.collision_pairs),
+                    "minimum_distance": result.minimum_distance,
+                },
+            )
+
+        joint_state = joint_state.copy()
+        joint_state[: self._collision_checker.arm_dofs] = safe_arm
+        return joint_state
 
     def command_joint_state(self, joint_state: np.ndarray) -> None:
         self._assert_running()
-        joint_state = np.asarray(joint_state, dtype=float)
-        if joint_state.shape != (self._interface_dofs,):
-            raise ValueError(
-                f"Expected joint state of length {self._interface_dofs}, got {len(joint_state)}."
-            )
+        joint_state = self._validate_joint_state(joint_state, "joint_state")
 
         with self._state_lock:
-            if self._collision_checker is not None:
-                desired_arm = joint_state[: self._collision_checker.arm_dofs]
-                current_arm = self._data.qpos[self._arm_qpos_adrs].copy()
-                safe_arm = self._collision_checker.project_to_safe(current_arm, desired_arm)
-                if self._collision_debug and not np.allclose(safe_arm, desired_arm):
-                    result = self._collision_checker.check(desired_arm)
-                    logger.debug(
-                        "Self-collision filter clipped UR3 sim command: %s",
-                        {
-                            "current": np.round(current_arm, 4).tolist(),
-                            "desired": np.round(desired_arm, 4).tolist(),
-                            "safe": np.round(safe_arm, 4).tolist(),
-                            "pairs": list(result.collision_pairs),
-                            "minimum_distance": result.minimum_distance,
-                        },
-                    )
-                joint_state = joint_state.copy()
-                joint_state[: self._collision_checker.arm_dofs] = safe_arm
-
+            joint_state = self._project_safe_arm_command_locked(joint_state)
             gripper_gap = abs(float(joint_state[-1]) - float(self._joint_state[-1]))
             substeps = (
                 self._gripper_command_substeps

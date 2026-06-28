@@ -1,0 +1,29 @@
+# Simulated bimanual UR5e with two GELLO leaders.
+robot: bi_ur5e
+mode: sim
+left_teleop_port: /dev/ttyUSB0
+right_teleop_port: /dev/ttyUSB1
+fps: 30
+viewer: true
+
+repo_id: USER/SIM_BI_UR5E_DATASET
+single_task: Describe the simulated bimanual task here.
+num_episodes: 10
+episode_time_s: 60.0
+
+cameras:
+  global:
+    type: mujoco
+    width: 640
+    height: 480
+    fps: 30
+  left_wrist:
+    type: mujoco
+    width: 640
+    height: 480
+    fps: 30
+  right_wrist:
+    type: mujoco
+    width: 640
+    height: 480
+    fps: 30

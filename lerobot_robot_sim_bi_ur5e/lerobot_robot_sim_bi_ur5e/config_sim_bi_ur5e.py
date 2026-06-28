@@ -8,8 +8,8 @@ from lerobot.cameras import CameraConfig
 from lerobot.robots import RobotConfig
 from lerobot_camera_mujoco import MujocoCameraConfig  # noqa: F401
 
-## this start joint is ONLY for simulation and does not correspond to any real-world recommended start joint for the UR5e. 
-# It is chosen to be a reasonably "open" configuration that allows the arms to move around without immediately colliding with each other or the table.
+## this start joint is ONLY for simulation and does not correspond to any real-world recommended start joint for the UR5e.
+# It is chosen to be a reasonably "open" configuration that keeps the arms away from each other.
 LEFT_UR5E_START_JOINTS = (
     0.0,
     -np.pi / 2,
@@ -50,16 +50,7 @@ class SimBiUR5EConfig(RobotConfig):
     command_substeps: int = 6
     gripper_command_substeps: int = 120
 
-    table_size: tuple[float, float, float] = (1.2, 0.75, 0.05)
-    table_height: float = 0.75
-    cube_count: int = 10
-    cube_size: float = 0.035
-    show_tool_collision: bool = False
-    attached_broom_side: str | None = "left"
-    attached_dustpan_side: str | None = "right"
-
     project_root: Path | None = None
-    assets_dir: Path | None = None
     ur5e_xml_path: Path | None = None
     robotiq_xml_path: Path | None = None
     extra_backend_kwargs: dict = field(default_factory=dict)

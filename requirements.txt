@@ -5,6 +5,13 @@
 # recording, visualization, Dynamixel/GELLO, and RealSense workflows.
 -e ./third_party/lerobot[core_scripts,dynamixel,intelrealsense]
 
+# MuJoCo simulation stack used by the sim robot and camera plugins.
+mujoco
+dm-control
+pin
+opencv-python-headless
+pyyaml
+
 # ROMI teleoperation plugins.
 -e ./lerobot_camera_mujoco
 -e ./lerobot_teleoperator_gello
