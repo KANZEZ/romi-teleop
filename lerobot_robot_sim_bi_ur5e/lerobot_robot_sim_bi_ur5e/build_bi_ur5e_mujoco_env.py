@@ -12,6 +12,8 @@ from dm_control import mjcf
 LEFT_ARM_BASE_POS = (-0.48, 0.62, 0.0)
 RIGHT_ARM_BASE_POS = (0.48, 0.62, 0.0)
 ARM_BASE_QUAT = (0.7071068, 0.0, 0.0, -0.7071068)
+WRIST_CAMERA_DEFAULT_POS = "0.0 0.15 0.075"
+WRIST_CAMERA_DEFAULT_EULER = "1.310526 0 0"
 
 
 def attach_gripper_to_arm(arm_mjcf: mjcf.RootElement, gripper_mjcf: mjcf.RootElement) -> None:
@@ -30,8 +32,8 @@ def add_wrist_camera(arm_mjcf: mjcf.RootElement, camera_name: str) -> None:
         "camera",
         name=camera_name,
         mode="fixed",
-        pos="0 -0.08 0.02",
-        euler="2.8 0 0",
+        pos=WRIST_CAMERA_DEFAULT_POS,
+        euler=WRIST_CAMERA_DEFAULT_EULER,
         fovy="60",
     )
 

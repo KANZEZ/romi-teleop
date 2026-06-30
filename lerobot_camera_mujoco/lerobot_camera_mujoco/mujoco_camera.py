@@ -37,6 +37,8 @@ class MujocoCamera(Camera):
         self._new_frame_event = Event()
         self._stop_event: Event | None = None
         self._thread: Thread | None = None
+        self._ready_event = Event()
+        self._thread_error: BaseException | None = None
         self._connected = False
 
     def __repr__(self) -> str:
@@ -67,8 +69,11 @@ class MujocoCamera(Camera):
             raise DeviceNotConnectedError(f"{self} is not bound to a MuJoCo model/data.")
         self._connected = True
         self._start_read_thread()
+        if self._thread_error is not None:
+            self.disconnect()
+            raise RuntimeError(f"Failed to start render thread for {self}.") from self._thread_error
         if warmup:
-            self.async_read(timeout_ms=1000)
+            self.async_read(timeout_ms=10000)
 
     def _ensure_renderer(self) -> mujoco.Renderer:
         if self._model is None:
@@ -84,6 +89,45 @@ class MujocoCamera(Camera):
             raise DeviceNotConnectedError(f"{self} is not bound to MuJoCo data.")
 
         self._render_current_data()
+
+    def _copy_source_state(self, render_data: mujoco.MjData) -> None:
+        if self._data is None:
+            raise DeviceNotConnectedError(f"{self} is not bound to MuJoCo data.")
+
+        def copy_state() -> None:
+            render_data.qpos[:] = self._data.qpos
+            render_data.qvel[:] = self._data.qvel
+            render_data.act[:] = self._data.act
+            render_data.mocap_pos[:] = self._data.mocap_pos
+            render_data.mocap_quat[:] = self._data.mocap_quat
+
+        if self._data_lock is None:
+            copy_state()
+        else:
+            with self._data_lock:
+                copy_state()
+
+    def _render_from_snapshot(self, renderer: mujoco.Renderer, render_data: mujoco.MjData) -> None:
+        if self._model is None:
+            raise DeviceNotConnectedError(f"{self} is not bound to a MuJoCo model.")
+
+        self._copy_source_state(render_data)
+        mujoco.mj_forward(self._model, render_data)
+
+        renderer.disable_depth_rendering()
+        renderer.update_scene(render_data, camera=self._camera)
+        image = renderer.render().copy()
+
+        if self.config.use_depth:
+            renderer.enable_depth_rendering()
+            renderer.update_scene(render_data, camera=self._camera)
+            depth = renderer.render().copy()[:, :, None].astype(np.float32)
+            renderer.disable_depth_rendering()
+        else:
+            with self._frame_lock:
+                depth = self._latest_depth
+
+        self._store_frame(image, depth)
 
     def _render_current_data(self) -> None:
         with self._render_lock:
@@ -103,6 +147,9 @@ class MujocoCamera(Camera):
             else:
                 depth = self._latest_depth
 
+        self._store_frame(image, depth)
+
+    def _store_frame(self, image: np.ndarray, depth: np.ndarray) -> None:
         with self._frame_lock:
             self._latest_image = image
             self._latest_depth = depth
@@ -114,26 +161,42 @@ class MujocoCamera(Camera):
         if self._thread is not None:
             return
         self._stop_event = Event()
+        self._ready_event.clear()
+        self._thread_error = None
         self._thread = Thread(target=self._read_loop, name=f"{self._camera}-mujoco-camera", daemon=True)
         self._thread.start()
+        if not self._ready_event.wait(timeout=10.0):
+            raise TimeoutError(f"Timed out starting render thread for {self}.")
 
     def _read_loop(self) -> None:
         assert self._stop_event is not None
+        if self._model is None:
+            self._ready_event.set()
+            raise DeviceNotConnectedError(f"{self} is not bound to a MuJoCo model.")
+
         period_s = 1.0 / max(float(self.fps or 60), 1.0)
+        render_data = mujoco.MjData(self._model)
         try:
+            with self._render_lock:
+                self._renderer = mujoco.Renderer(self._model, height=self.height, width=self.width)
+                renderer = self._renderer
+            self._ready_event.set()
+
             while not self._stop_event.is_set():
                 start = time.perf_counter()
                 try:
-                    if self._data_lock is None:
-                        self._render_current_data()
-                    else:
-                        with self._data_lock:
-                            self._render_current_data()
-                except Exception:
+                    self._render_from_snapshot(renderer, render_data)
+                except Exception as exc:
                     if not self._stop_event.is_set():
                         logger.exception("Failed to render %s.", self)
+                    self._thread_error = exc
                 elapsed_s = time.perf_counter() - start
                 self._stop_event.wait(max(period_s - elapsed_s, 0.0))
+        except BaseException as exc:
+            self._thread_error = exc
+            self._ready_event.set()
+            if not self._stop_event.is_set():
+                logger.exception("MuJoCo render thread stopped for %s.", self)
         finally:
             self._close_renderer()
 
@@ -165,6 +228,8 @@ class MujocoCamera(Camera):
     def async_read(self, timeout_ms: float = 200) -> np.ndarray:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
+        if self._thread_error is not None and (self._thread is None or not self._thread.is_alive()):
+            raise RuntimeError(f"{self} render thread failed.") from self._thread_error
 
         deadline = time.perf_counter() + timeout_ms / 1000.0
         while True:

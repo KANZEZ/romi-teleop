@@ -21,6 +21,7 @@ class SimUR3E(Robot):
         super().__init__(config)
         self.config = config
         self.backend = None
+        self.cameras = config.cameras
 
     @property
     def _motors_ft(self) -> dict[str, type]:
