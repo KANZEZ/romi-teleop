@@ -1,21 +1,17 @@
-# Real single-arm UR3 with one GELLO leader.
+# Real single-arm UR3 with one GELLO leader. The default arm is right arm
 robot: ur3
 mode: real
-robot_ip: 158.132.172.214
-teleop_port: /dev/ttyUSB0
+arm: right
+right_robot_ip: 158.132.172.214
+right_teleop_port: /dev/ttyUSB1
 
 repo_id: USER/UR3_DATASET
 single_task: Describe the task here.
 num_episodes: 10
 episode_time_s: 60.0
+max-joint-delta: 0.05
 
 cameras:
-  d455:
-    type: realsense
-    serial_number_or_name: "239222303378"
-    width: 1280
-    height: 720
-    fps: 30
   d435:
     type: realsense
     serial_number_or_name: "317222074788"

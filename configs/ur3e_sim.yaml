@@ -1,7 +1,7 @@
 # Simulated UR3e with one GELLO leader.
 robot: ur3e
 mode: sim
-teleop_port: /dev/ttyUSB0
+teleop_port: /dev/ttyUSB1
 fps: 30
 viewer: true
 

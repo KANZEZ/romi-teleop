@@ -6,6 +6,14 @@ import mujoco
 from dm_control import mjcf
 
 
+# Viewer-facing assignment:
+# - the arm on the viewer's right is the control "left" arm, driven by USB0
+# - the arm on the viewer's left is the control "right" arm, driven by USB1
+LEFT_ARM_BASE_POS = (-0.48, 0.62, 0.0)
+RIGHT_ARM_BASE_POS = (0.48, 0.62, 0.0)
+ARM_BASE_QUAT = (0.7071068, 0.0, 0.0, -0.7071068)
+
+
 def attach_gripper_to_arm(arm_mjcf: mjcf.RootElement, gripper_mjcf: mjcf.RootElement) -> None:
     attachment_site = arm_mjcf.find("site", "attachment_site")
     if attachment_site is None:
@@ -109,15 +117,15 @@ def build_bi_ur5e_mujoco_env(
         arm_xml_path=ur5e_xml_path,
         gripper_xml_path=robotiq_xml_path,
         side="left",
-        base_pos=(-0.48, 0.62, 0.0),
-        base_quat=(0.7071068, 0.0, 0.0, -0.7071068),
+        base_pos=LEFT_ARM_BASE_POS,
+        base_quat=ARM_BASE_QUAT,
     )
     right_arm = build_single_arm(
         arm_xml_path=ur5e_xml_path,
         gripper_xml_path=robotiq_xml_path,
         side="right",
-        base_pos=(0.48, 0.62, 0.0),
-        base_quat=(0.7071068, 0.0, 0.0, -0.7071068),
+        base_pos=RIGHT_ARM_BASE_POS,
+        base_quat=ARM_BASE_QUAT,
     )
     arena.worldbody.attach(left_arm)
     arena.worldbody.attach(right_arm)

@@ -1,8 +1,9 @@
 # Real single-arm UR5e with one GELLO leader.
 robot: ur5e
 mode: real
-robot_ip: 192.168.0.10
-teleop_port: /dev/ttyUSB0
+arm: right
+right_robot_ip: 192.168.0.10
+right_teleop_port: /dev/ttyUSB1
 
 repo_id: USER/UR5E_DATASET
 single_task: Describe the task here.

@@ -6,18 +6,14 @@ right_robot_ip: 158.132.172.214
 left_teleop_port: /dev/ttyUSB0
 right_teleop_port: /dev/ttyUSB1
 
-repo_id: USER/BI_UR3_DATASET
+repo_id: USER/BI_UR3_DATASET1
 single_task: Describe the bimanual task here.
 num_episodes: 10
 episode_time_s: 60.0
+display-data: false
+max-joint-delta: 0.05
 
 cameras:
-  d455:
-    type: realsense
-    serial_number_or_name: "239222303378"
-    width: 1280
-    height: 720
-    fps: 30
   d435:
     type: realsense
     serial_number_or_name: "317222074788"

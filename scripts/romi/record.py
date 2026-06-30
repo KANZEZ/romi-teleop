@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--private", action="store_true")
     parser.add_argument("--play-sounds", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--viewer", action="store_true", help="Show MuJoCo viewer in sim mode.")
+    parser.add_argument("--home-gripper-position", type=float, default=0.1)
     return parse_args_with_config(parser)
 
 
@@ -58,6 +59,7 @@ def main() -> None:
             display_data=args.display_data,
             play_sounds=args.play_sounds,
             resume=args.resume,
+            home_gripper_position=args.home_gripper_position,
         )
     )
 

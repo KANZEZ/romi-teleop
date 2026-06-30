@@ -48,6 +48,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Camera config dict, e.g. '{\"cam\": {\"type\": \"realsense\", \"serial_number_or_name\": \"...\", \"width\": 640, \"height\": 480, \"fps\": 30}}'.",
     )
     parser.add_argument("--no-gripper", action="store_true")
+    parser.add_argument("--arm", choices=("left", "right"), default=None, help="Single-arm side for UR3/UR5e real setups.")
     parser.add_argument("--robot-ip")
     parser.add_argument("--left-robot-ip")
     parser.add_argument("--right-robot-ip")
@@ -56,7 +57,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--right-teleop-port", default="/dev/ttyUSB1")
     parser.add_argument("--max-joint-delta", type=float, default=0.1)
     parser.add_argument("--command-substeps", type=int, default=6)
-    parser.add_argument("--gripper-command-substeps", type=int, default=120)
+    parser.add_argument("--gripper-command-substeps", type=int, default=6)
 
 
 def parse_args_with_config(parser: argparse.ArgumentParser) -> argparse.Namespace:
@@ -86,11 +87,16 @@ def make_teleop_config(args: argparse.Namespace):
             calibration_dir=root,
             left_arm_config=_gello("left", args.left_teleop_port, root / "left", left_home),
             right_arm_config=_gello("right", args.right_teleop_port, root / "right", right_home),
-        )
+    )
+    arm = args.arm or "right"
+    home = _single_gello_home(args, arm)
+    port = args.left_teleop_port if arm == "left" else args.right_teleop_port
     return GelloConfig(
-        id="gello",
-        port=args.teleop_port,
-        calibration_dir=Path(args.calibration_dir) / "teleoperators" / f"gello_{args.robot}_{args.mode}",
+        id=f"{arm}_gello",
+        port=port,
+        calibration_dir=Path(args.calibration_dir) / "teleoperators" / f"gello_{args.robot}_{args.mode}" / arm,
+        calibration_position=list(home[:6]),
+        joint_signs=GELLO_SIGNS,
     )
 
 
@@ -98,21 +104,29 @@ def _make_real_robot_config(args: argparse.Namespace):
     root = Path(args.calibration_dir) / "robots"
     max_delta = args.max_joint_delta if args.max_joint_delta > 0 else None
     if args.robot == "ur3":
+        arm = args.arm or "right"
+        default_ip, start_joints = _ur3_single_arm_defaults(arm)
+        side_ip = args.left_robot_ip if arm == "left" else args.right_robot_ip
         return UR3Config(
-            id="ur3",
-            ip=args.robot_ip or RIGHT_UR3_IP,
-            calibration_dir=root / "ur3",
+            id=f"{arm}_ur3",
+            ip=side_ip or default_ip,
+            calibration_dir=root / "ur3" / arm,
             cameras=_cameras(args),
+            start_joints=start_joints,
             with_gripper=not args.no_gripper,
             gripper_auto_calibrate=False,
             max_joint_delta_per_step=max_delta,
         )
     if args.robot == "ur5e":
+        arm = args.arm or "right"
+        default_ip, start_joints = _ur5e_single_arm_defaults(arm)
+        side_ip = args.left_robot_ip if arm == "left" else args.right_robot_ip
         return UR5EConfig(
-            id="ur5e",
-            ip=args.robot_ip or RIGHT_UR5E_IP,
-            calibration_dir=root / "ur5e",
+            id=f"{arm}_ur5e",
+            ip=side_ip or default_ip,
+            calibration_dir=root / "ur5e" / arm,
             cameras=_cameras(args),
+            start_joints=start_joints,
             with_gripper=not args.no_gripper,
             max_joint_delta_per_step=max_delta,
         )
@@ -135,6 +149,22 @@ def _make_real_robot_config(args: argparse.Namespace):
             right_arm_config=_ur5e("right", right_ip, root / "bi_ur5e" / "right", RIGHT_UR5E_START_JOINTS, args, max_delta),
         )
     raise ValueError(f"Unsupported real robot: {args.robot}")
+
+
+def _ur3_single_arm_defaults(arm: str) -> tuple[str, tuple[float, ...]]:
+    if arm == "left":
+        return LEFT_UR3_IP, LEFT_UR3_START_JOINTS
+    if arm == "right":
+        return RIGHT_UR3_IP, RIGHT_UR3_START_JOINTS
+    raise ValueError(f"Unsupported UR3 arm side: {arm!r}.")
+
+
+def _ur5e_single_arm_defaults(arm: str) -> tuple[str, tuple[float, ...]]:
+    if arm == "left":
+        return LEFT_UR5E_IP, LEFT_UR5E_START_JOINTS
+    if arm == "right":
+        return RIGHT_UR5E_IP, RIGHT_UR5E_START_JOINTS
+    raise ValueError(f"Unsupported UR5e arm side: {arm!r}.")
 
 
 def _make_sim_robot_config(args: argparse.Namespace):
@@ -203,6 +233,18 @@ def _bi_gello_homes(args: argparse.Namespace):
     return LEFT_UR5E_GELLO_CALIBRATION_POSITION, RIGHT_UR5E_GELLO_CALIBRATION_POSITION
 
 
+def _single_gello_home(args: argparse.Namespace, arm: str) -> list[float] | tuple[float, ...]:
+    if args.robot == "ur3":
+        if arm == "left":
+            return UR3_LEFT_GELLO_HOME
+        return UR3_RIGHT_GELLO_HOME
+    if args.robot == "ur5e":
+        if arm == "left":
+            return LEFT_UR5E_GELLO_CALIBRATION_POSITION
+        return RIGHT_UR5E_GELLO_CALIBRATION_POSITION
+    return GelloConfig().calibration_position
+
+
 def _cameras(args: argparse.Namespace):
     camera_specs = _camera_specs(args.cameras)
     if not camera_specs:
@@ -211,6 +253,8 @@ def _cameras(args: argparse.Namespace):
 
 
 def _camera_specs(value):
+    if value is None:
+        return {}
     if isinstance(value, dict):
         return value
     if value.strip().lower() in ("", "none", "null"):

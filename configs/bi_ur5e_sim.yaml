@@ -5,12 +5,17 @@ left_teleop_port: /dev/ttyUSB0
 right_teleop_port: /dev/ttyUSB1
 fps: 30
 viewer: true
+display-data: false
+gripper-command-substeps: 6
 
 repo_id: USER/SIM_BI_UR5E_DATASET
 single_task: Describe the simulated bimanual task here.
 num_episodes: 10
 episode_time_s: 60.0
+max_joint_delta: 1.0
 
+cameras:
+# To enable MuJoCo cameras for display/recording, replace null with:
 cameras:
   global:
     type: mujoco

@@ -38,7 +38,7 @@ ROBOTIQ_CTRL_MAX = 255.0
 ROBOTIQ_DRIVER_CLOSED = 0.9
 GRIPPER_POSITION_EPS = 0.01
 DEFAULT_COMMAND_SUBSTEPS = 6
-DEFAULT_GRIPPER_COMMAND_SUBSTEPS = 120
+DEFAULT_GRIPPER_COMMAND_SUBSTEPS = 6
 
 
 def _project_root(project_root: str | Path | None) -> Path:
@@ -243,9 +243,9 @@ class BiUR5EMujocoBackend:
             mujoco.mj_forward(self._model, self._data)
             self._apply_joint_cmd_locked(substeps=100)
 
-        self._configure_cameras(camera_configs or {})
         if show_viewer:
             self._launch_viewer()
+        self._configure_cameras(camera_configs or {})
 
     def _assert_running(self) -> None:
         if self._stopped:
@@ -267,7 +267,12 @@ class BiUR5EMujocoBackend:
                 )
             camera_name = camera_config.camera if camera_config.camera is not None else camera_key
             camera = MujocoCamera(camera_config)
-            camera.bind(self._model, self._data, _find_camera_id(self._model, str(camera_name)))
+            camera.bind(
+                self._model,
+                self._data,
+                _find_camera_id(self._model, str(camera_name)),
+                data_lock=self._state_lock,
+            )
             camera.connect()
             self._cameras.append((camera_key, camera))
 
@@ -384,9 +389,13 @@ class BiUR5EMujocoBackend:
 
     def get_camera_observations(self) -> dict[str, np.ndarray]:
         self._assert_running()
-        with self._state_lock:
-            self._render_cameras_locked()
-            return {camera_name: camera.read() for camera_name, camera in self._cameras}
+        observations = {}
+        for camera_name, camera in self._cameras:
+            try:
+                observations[camera_name] = camera.async_read(timeout_ms=5)
+            except TimeoutError:
+                observations[camera_name] = camera.read_cached()
+        return observations
 
     def stop(self) -> None:
         if self._stopped:

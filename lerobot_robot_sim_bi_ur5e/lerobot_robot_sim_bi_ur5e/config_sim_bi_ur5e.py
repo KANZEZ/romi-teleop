@@ -8,23 +8,24 @@ from lerobot.cameras import CameraConfig
 from lerobot.robots import RobotConfig
 from lerobot_camera_mujoco import MujocoCameraConfig  # noqa: F401
 
-## this start joint is ONLY for simulation and does not correspond to any real-world recommended start joint for the UR5e.
-# It is chosen to be a reasonably "open" configuration that keeps the arms away from each other.
+# These start joints are ONLY for simulation. They match the MuJoCo scene
+# geometry, not the real bimanual UR5e/GELLO home poses. The left/right names
+# are the control definitions: left is driven by USB0, right is driven by USB1.
 LEFT_UR5E_START_JOINTS = (
-    0.0,
-    -np.pi / 2,
-    np.pi / 2,
-    -np.pi / 2,
-    -np.pi / 2,
-    0.0,
-    0.0,
-)
-RIGHT_UR5E_START_JOINTS = (
     np.pi,
     -np.pi / 2,
     -np.pi / 2,
     -np.pi / 2,
     np.pi / 2,
+    0.0,
+    0.0,
+)
+RIGHT_UR5E_START_JOINTS = (
+    0.0,
+    -np.pi / 2,
+    np.pi / 2,
+    -np.pi / 2,
+    -np.pi / 2,
     0.0,
     0.0,
 )
@@ -48,7 +49,7 @@ class SimBiUR5EConfig(RobotConfig):
 
     show_viewer: bool = False
     command_substeps: int = 6
-    gripper_command_substeps: int = 120
+    gripper_command_substeps: int = 6
 
     project_root: Path | None = None
     ur5e_xml_path: Path | None = None

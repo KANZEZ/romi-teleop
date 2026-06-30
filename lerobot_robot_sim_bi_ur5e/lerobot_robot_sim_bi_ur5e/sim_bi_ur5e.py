@@ -141,6 +141,14 @@ class SimBiUR5E(Robot):
         sent_action["right_gripper"] = float(right_state[6])
         return sent_action
 
+    def move_to_start_joints(self, wait: bool = True) -> None:
+        del wait
+        backend = self._require_backend()
+        backend.command_joint_state(
+            self.config.left_start_joints_array(),
+            self.config.right_start_joints_array(),
+        )
+
     def disconnect(self) -> None:
         if self.backend is None:
             return
