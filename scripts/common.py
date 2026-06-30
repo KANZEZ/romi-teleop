@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import logging
 from pathlib import Path
 
 import yaml
@@ -68,6 +69,16 @@ def parse_args_with_config(parser: argparse.ArgumentParser) -> argparse.Namespac
     if config_args.config is not None:
         parser.set_defaults(**_load_yaml_defaults(config_args.config))
     return parser.parse_args(remaining)
+
+
+def move_robot_home(robot, gripper_position: float, log_label: str | None = None) -> None:
+    robot_label = log_label if log_label is not None else str(robot)
+    if hasattr(robot, "move_to_start_joints"):
+        logging.info("Moving %s to configured home/start joints.", robot_label)
+        robot.move_to_start_joints(wait=True)
+    if hasattr(robot, "reset_gripper"):
+        logging.info("Resetting %s gripper.", robot_label)
+        robot.reset_gripper(gripper_position)
 
 
 def make_robot_config(args: argparse.Namespace):

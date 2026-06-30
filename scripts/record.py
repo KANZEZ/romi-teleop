@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from lerobot.scripts import lerobot_record
 from lerobot.scripts.lerobot_record import DatasetRecordConfig, RecordConfig, record
 from lerobot.utils.import_utils import register_third_party_plugins
 
-from common import add_common_args, make_robot_config, make_teleop_config, parse_args_with_config
+from common import add_common_args, make_robot_config, make_teleop_config, move_robot_home, parse_args_with_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,11 +34,37 @@ def parse_args() -> argparse.Namespace:
     return parse_args_with_config(parser)
 
 
+class _HomeBeforeTeleopRobot:
+    def __init__(self, robot, gripper_position: float):
+        self._robot = robot
+        self._gripper_position = gripper_position
+
+    def __getattr__(self, name):
+        return getattr(self._robot, name)
+
+    def __str__(self) -> str:
+        return str(self._robot)
+
+    def connect(self, calibrate: bool = True) -> None:
+        self._robot.connect(calibrate)
+        move_robot_home(self._robot, self._gripper_position)
+
+
+def _install_home_before_teleop_hook(gripper_position: float) -> None:
+    make_robot_from_config = lerobot_record.make_robot_from_config
+
+    def make_home_robot_from_config(config):
+        return _HomeBeforeTeleopRobot(make_robot_from_config(config), gripper_position)
+
+    lerobot_record.make_robot_from_config = make_home_robot_from_config
+
+
 def main() -> None:
     args = parse_args()
     if args.repo_id is None or args.single_task is None:
         raise ValueError("Missing --repo-id or --single-task. Set them in YAML or pass them on the command line.")
     register_third_party_plugins()
+    _install_home_before_teleop_hook(args.home_gripper_position)
     record(
         RecordConfig(
             robot=make_robot_config(args),
@@ -59,7 +86,6 @@ def main() -> None:
             display_data=args.display_data,
             play_sounds=args.play_sounds,
             resume=args.resume,
-            home_gripper_position=args.home_gripper_position,
         )
     )
 

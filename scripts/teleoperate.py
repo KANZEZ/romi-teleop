@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import time
 
 from lerobot.processor import make_default_processors
@@ -14,7 +13,7 @@ from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging
 from lerobot.utils.visualization_utils import init_rerun, shutdown_rerun
 
-from common import add_common_args, make_robot_config, make_teleop_config, parse_args_with_config
+from common import add_common_args, make_robot_config, make_teleop_config, move_robot_home, parse_args_with_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,7 +45,7 @@ def main() -> None:
             print("Loading MuJoCo simulation and viewer...")
         robot.connect()
         robot_connected = True
-        _move_robot_home(robot, args.home_gripper_position)
+        move_robot_home(robot, args.home_gripper_position)
         if args.mode == "sim":
             print("MuJoCo viewer is ready. Robot is at home. Connecting teleoperator; calibration prompts may appear next.")
         teleop.connect()
@@ -75,15 +74,6 @@ def main() -> None:
             teleop.disconnect()
         if robot_connected:
             robot.disconnect()
-
-
-def _move_robot_home(robot, gripper_position: float) -> None:
-    if hasattr(robot, "move_to_start_joints"):
-        logging.info("Moving %s to configured home/start joints before teleoperator calibration.", robot)
-        robot.move_to_start_joints(wait=True)
-    if hasattr(robot, "reset_gripper"):
-        logging.info("Resetting %s gripper before teleoperator calibration.", robot)
-        robot.reset_gripper(gripper_position)
 
 
 def _teleop_loop(

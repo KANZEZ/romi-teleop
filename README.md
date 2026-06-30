@@ -120,19 +120,19 @@ right_teleop_port: /dev/ttyUSB1
 Reset moves a real robot to its configured start joints. In MuJoCo, it initializes and sanity-checks a fresh simulated scene at the configured initial joint state.
 
 ```bash
-python scripts/romi/reset.py --config configs/ur3_real.yaml
-python scripts/romi/reset.py --config configs/bi_ur3_real.yaml
-python scripts/romi/reset.py --config configs/ur3e_sim.yaml
-python scripts/romi/reset.py --config configs/bi_ur5e_sim.yaml
+python scripts/reset.py --config configs/ur3_real.yaml
+python scripts/reset.py --config configs/bi_ur3_real.yaml
+python scripts/reset.py --config configs/ur3e_sim.yaml
+python scripts/reset.py --config configs/bi_ur5e_sim.yaml
 ```
 
 ### Teleoperate
 
 ```bash
-python scripts/romi/teleoperate.py --config configs/ur3_real.yaml
-python scripts/romi/teleoperate.py --config configs/bi_ur3_real.yaml
-python scripts/romi/teleoperate.py --config configs/ur3e_sim.yaml
-python scripts/romi/teleoperate.py --config configs/bi_ur5e_sim.yaml
+python scripts/teleoperate.py --config configs/ur3_real.yaml
+python scripts/teleoperate.py --config configs/bi_ur3_real.yaml
+python scripts/teleoperate.py --config configs/ur3e_sim.yaml
+python scripts/teleoperate.py --config configs/bi_ur5e_sim.yaml
 ```
 
 ### Record
@@ -140,14 +140,14 @@ python scripts/romi/teleoperate.py --config configs/bi_ur5e_sim.yaml
 Before recording, set `repo_id`, `single_task`, `num_episodes`, and `episode_time_s` in the config.
 
 ```bash
-python scripts/romi/record.py --config configs/ur3_real.yaml
-python scripts/romi/record.py --config configs/bi_ur3_real.yaml
-python scripts/romi/record.py --config configs/ur3e_sim.yaml
-python scripts/romi/record.py --config configs/bi_ur5e_sim.yaml
+python scripts/record.py --config configs/ur3_real.yaml
+python scripts/record.py --config configs/bi_ur3_real.yaml
+python scripts/record.py --config configs/ur3e_sim.yaml
+python scripts/record.py --config configs/bi_ur5e_sim.yaml
 ```
 
 Command-line arguments override YAML values, so quick changes can be passed directly:
 
 ```bash
-python scripts/romi/record.py --config configs/ur3e_sim.yaml --num-episodes 3
+python scripts/record.py --config configs/ur3e_sim.yaml --num-episodes 3
 ```
